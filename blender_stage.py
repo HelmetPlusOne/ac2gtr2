@@ -205,9 +205,105 @@ def sanitize(name):
 # access violation rather than an error, so split before handing it over.
 MAX_TRIS = 20000
 
+# GTR2 frustum/distance/shadow culling works per GMT instance. Stock GTR2
+# tracks split world geometry into small ~30-150 m spatial chunks, whereas AC
+# tracks often merge whole roads, forests, or barriers into kilometer-wide
+# monolithic meshes. Splitting meshes wider than 1.5 * SPATIAL_TILE_SIZE into
+# horizontal 2D grid tiles lets GTR2 cull off-screen and distant geometry.
+SPATIAL_TILE_SIZE = 250.0
+SPATIAL_MIN_TRIS = 200
+SPATIAL_TINY_TILE_TRIS = 16
+
 # What one export costs beyond its triangles, in triangles: 0.1 s of fixed
 # cost at 1.5 s per 10k triangles (see the shard split in main).
 SHARD_MESH_COST = 700
+
+
+def geom_world_radius(verts, matrix):
+    """Bounding-sphere radius of a local vertex list after applying ``matrix``."""
+    if not verts:
+        return 0.0
+    xs, ys, zs = [], [], []
+    for p in verts:
+        w = matrix @ Vector(p)
+        xs.append(w.x)
+        ys.append(w.y)
+        zs.append(w.z)
+    dx = max(xs) - min(xs)
+    dy = max(ys) - min(ys)
+    dz = max(zs) - min(zs)
+    return 0.5 * (dx * dx + dy * dy + dz * dz) ** 0.5
+
+
+def split_spatial(verts, uvs, faces, normals, matrix,
+                  tile_size=SPATIAL_TILE_SIZE, min_tris=SPATIAL_MIN_TRIS):
+    """Split a spatially wide mesh into horizontal 2D grid tiles for GTR2 culling.
+
+    Small/compact meshes (horizontal span <= 1.5 * tile_size or < min_tris)
+    fall straight through to ``split_geom`` unchanged.
+    """
+    ntri = len(faces)
+    if ntri < min_tris or tile_size <= 0.0:
+        yield from split_geom(verts, uvs, faces, normals)
+        return
+
+    # AC_TO_RF2 swaps Y and Z into Blender coordinates, so horizontal ground
+    # plane in Blender space is (w.x, w.y).
+    wx = []
+    wy = []
+    for p in verts:
+        w = matrix @ Vector(p)
+        wx.append(w.x)
+        wy.append(w.y)
+
+    span_x = max(wx) - min(wx)
+    span_y = max(wy) - min(wy)
+    if max(span_x, span_y) <= tile_size * 1.5:
+        yield from split_geom(verts, uvs, faces, normals)
+        return
+
+    import math
+    inv = 1.0 / float(tile_size)
+    buckets = {}
+    for a, b, c in faces:
+        cx = (wx[a] + wx[b] + wx[c]) * (1.0 / 3.0)
+        cy = (wy[a] + wy[b] + wy[c]) * (1.0 / 3.0)
+        key = (math.floor(cx * inv), math.floor(cy * inv))
+        buckets.setdefault(key, []).append((a, b, c))
+
+    if len(buckets) <= 1:
+        yield from split_geom(verts, uvs, faces, normals)
+        return
+
+    # Fold tiny border slivers (< SPATIAL_TINY_TILE_TRIS) into the nearest
+    # non-tiny neighbor tile to avoid creating tiny 1-5 triangle GMT files.
+    major = [k for k, fl in buckets.items() if len(fl) >= SPATIAL_TINY_TILE_TRIS]
+    if major and len(major) < len(buckets):
+        for k in list(buckets.keys()):
+            if len(buckets[k]) < SPATIAL_TINY_TILE_TRIS:
+                target = min(major, key=lambda mk: (mk[0] - k[0]) ** 2 + (mk[1] - k[1]) ** 2)
+                buckets[target].extend(buckets.pop(k))
+
+    src_n = normals if normals and len(normals) == len(verts) else None
+    for key in sorted(buckets):
+        tile_faces = buckets[key]
+        remap = {}
+        t_verts, t_uvs, t_faces, t_normals = [], [], [], []
+        for a, b, c in tile_faces:
+            face = []
+            for vi in (a, b, c):
+                local = remap.get(vi)
+                if local is None:
+                    local = remap[vi] = len(t_verts)
+                    t_verts.append(verts[vi])
+                    t_uvs.append(uvs[vi])
+                    if src_n is not None:
+                        t_normals.append(src_n[vi])
+                face.append(local)
+            t_faces.append(tuple(face))
+        yield from split_geom(
+            t_verts, t_uvs, t_faces, (t_normals if src_n is not None else None)
+        )
 
 
 def split_node(node):
@@ -981,27 +1077,25 @@ def main():
                     continue
 
             matrix = AC_TO_RF2 @ world_matrix(node)
+            idx = node.indices
+            ntri = node.index_count // 3
+            raw_verts = [tuple(v) for v in node.verts]
+            raw_faces = [
+                (idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2])
+                for t in range(ntri)
+            ]
+            raw_n = (
+                node.normals
+                if node.normals and len(node.normals) == len(raw_verts)
+                else None
+            )
+            c_verts, c_uvs, c_faces, c_norms = raw_verts, node.uvs, raw_faces, raw_n
             if coarsening > 0.0:
-                ntri = node.index_count // 3
                 bb_role = mesh_coarsen.classify_billboard_role(row, ntris=ntri)
                 bb_keep = mesh_coarsen.billboard_keep_ratio(coarsening, bb_role)
                 role = mesh_coarsen.classify_mesh_role(row, ntris=ntri)
                 ratio = mesh_coarsen.coarsen_ratio(coarsening, role)
                 if bb_keep < 1.0 or ratio < 1.0:
-                    idx = node.indices
-                    raw_verts = [tuple(v) for v in node.verts]
-                    raw_faces = [
-                        (idx[t * 3], idx[t * 3 + 1], idx[t * 3 + 2])
-                        for t in range(ntri)
-                    ]
-                    raw_n = (
-                        node.normals
-                        if node.normals and len(node.normals) == len(raw_verts)
-                        else None
-                    )
-                    c_verts, c_uvs, c_faces, c_norms = (
-                        raw_verts, node.uvs, raw_faces, raw_n
-                    )
                     if bb_keep < 1.0:
                         _min_k, max_comp_tris = mesh_coarsen.BILLBOARD_ROLES[bb_role]
                         c_verts, c_uvs, c_faces, c_norms = (
@@ -1023,13 +1117,10 @@ def main():
                         coarsen_meshes += 1
                         coarsen_before += ntri
                         coarsen_after += len(c_faces)
-                        parts = list(split_geom(c_verts, c_uvs, c_faces, c_norms))
-                    else:
-                        parts = list(split_node(node))
-                else:
-                    parts = list(split_node(node))
+            if row.get("backdrop"):
+                parts = list(split_geom(c_verts, c_uvs, c_faces, c_norms))
             else:
-                parts = list(split_node(node))
+                parts = list(split_spatial(c_verts, c_uvs, c_faces, c_norms, matrix))
             # Cut the clear sky out of the mesh so what remains can be drawn
             # opaque: it then writes depth and sorts behind the trees. Only
             # where the alpha test is not doing that already. A cut-out
@@ -1089,6 +1180,7 @@ def main():
                     new = sorted(now - before)
                     before = now
                     if match or new:
+                        part_radius = round(geom_world_radius(geom[0], matrix), 2)
                         exported.append({
                             "mesh": row["mesh"],
                             "id": row.get("id"),
@@ -1099,8 +1191,8 @@ def main():
                             "lod_in": row.get("lod_in", 0.0),
                             "lod_out": row.get("lod_out", 0.0),
                             "blend": row.get("needs_blend", False),
-                            "radius": row.get("radius", 0.0),
-                            "tris": len(geom[2]) if coarsening > 0.0 else row["tris"],
+                            "radius": part_radius if part_radius > 0.0 else row.get("radius", 0.0),
+                            "tris": len(geom[2]),
                         })
                         if shards > 1:
                             # Where this belongs in a single run's list;

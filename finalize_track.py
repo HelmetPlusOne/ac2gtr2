@@ -48,12 +48,12 @@ View=mainview
     Color=(149, 218, 254)
     Size=(512.0, 256.0) Center=(256.0, 128.0)
     FOV=(77.5, 62.5)
-    ClipPlanes=(0.50, 2000.00)
+    ClipPlanes=(0.50, 400.00)
   }}
 }}
 
 GroupMethod=Dynamic
-MaxShadowRange=(500.0)
+MaxShadowRange=({max_shadow_range:.1f})
 
 {skybox}
 """
@@ -282,19 +282,106 @@ def install_location(stage, locations, venue):
                       % (swap_root, exc))
 
 
-def shadow_caster(row, cutouts):
-    """How this mesh casts a shadow in GTR2, or None."""
-    if not row.get("render", True) or not row.get("cast_shadows"):
+DRIVABLE_PREFIXES = ("road", "conc", "rmbl", "gras", "grvl", "dirt")
+COMPACT_SHADOW_MAX_RADIUS = 60.0
+COMPACT_SHADOW_MAX_TRIS = 8000
+FULL_SHADOW_MAX_RADIUS = 150.0
+
+
+def is_shadow_receiver(meta, row, mode="compact"):
+    """Return True when this GTR2 instance should receive projected shadows.
+
+    GTR2 projects every active ShadowCaster texture onto every overlapping
+    ShadowReceiver mesh in a separate pass. Stock GTR2 tracks set
+    ShadowReceiver=True only on road/ground surfaces (~10-25% of instances)
+    rather than on trees, fences, and props, keeping car shadows intact while
+    preventing N_casters * N_receivers pass explosions.
+    """
+    if not row.get("render", True) or row.get("timing"):
+        return False
+    if meta is None:
+        return bool(row.get("physical"))
+    if meta.get("decal") or meta.get("backdrop"):
+        return False
+    if meta.get("alpha_test") or meta.get("needs_blend"):
+        return False
+    if meta.get("shader") in ("ksTree", "ksGrass"):
+        return False
+    if mode == "full":
+        return True
+    mat_prefix = str(meta.get("rf2_material", "")).split("_", 1)[0].lower()
+    if row.get("physical") and mat_prefix in DRIVABLE_PREFIXES:
+        return True
+    if meta.get("ground_like") or meta.get("track_surface"):
+        return True
+    return float(meta.get("upward", 0.0)) >= 0.5
+
+
+def shadow_caster(meta, cutouts, mode="compact", radius=0.0, tris=0):
+    """Return ``(kind, map_size)`` for GTR2 ShadowCaster, or None.
+
+    Modes:
+      - ``off``: no track ShadowCaster entries (cars still cast shadows onto
+        ShadowReceiver=True ground/road surfaces).
+      - ``compact`` (default): only compact opaque structures (radius <= 60 m,
+        <= 8000 tris) at 32x32 or 64x64; skips foliage/alpha-tested Texture
+        shadow maps to match stock GTR2 shadow budgets.
+      - ``full``: opaque and alpha-tested cutouts up to 150 m radius at 64x64.
+    """
+    if mode == "off" or meta is None:
         return None
-    if row.get("decal") or row.get("backdrop"):
+    if not meta.get("render", True) or not meta.get("cast_shadows"):
         return None
-    if row.get("needs_blend") and not row.get("alpha_test"):
+    if meta.get("decal") or meta.get("backdrop"):
         return None
-    if float(row.get("upward", 0.0)) >= 0.9:
+    if meta.get("needs_blend") and not meta.get("alpha_test"):
         return None
-    if row.get("alpha_test"):
-        return "Texture" if row["rf2_material"] in cutouts else None
-    return "Solid"
+    if float(meta.get("upward", 0.0)) >= 0.9:
+        return None
+
+    r = float(radius or meta.get("radius", 0.0) or 0.0)
+    t = int(tris or meta.get("tris", 0) or 0)
+
+    if mode == "compact":
+        if meta.get("alpha_test") or meta.get("shader") in ("ksTree", "ksGrass"):
+            return None
+        if r > COMPACT_SHADOW_MAX_RADIUS or t > COMPACT_SHADOW_MAX_TRIS:
+            return None
+        size = 32 if r <= 25.0 else 64
+        return ("Solid", size)
+
+    # mode == "full"
+    if r > FULL_SHADOW_MAX_RADIUS:
+        return None
+    if meta.get("alpha_test"):
+        return ("Texture", 64) if meta.get("rf2_material") in cutouts else None
+    return ("Solid", 64)
+
+
+def gtr2_lod_range(meta, row):
+    """Return ``(lod_in, lod_out)`` for a .trk instance to aid GTR2 distance culling.
+
+    Preserves AC's explicit LODIn/LODOut when set; otherwise applies stock-like
+    distance culling to grass, foliage cutouts, and small non-ground props
+    while keeping roads, terrain, and backdrops visible to the horizon.
+    """
+    lin = float(row.get("lod_in") or 0.0)
+    lout = float(row.get("lod_out") or 0.0)
+    if lout > 0.0:
+        return lin, lout
+    if meta is None or row.get("physical") or meta.get("backdrop"):
+        return 0.0, 0.0
+    if meta.get("ground_like") or meta.get("track_surface"):
+        return 0.0, 0.0
+    shader = meta.get("shader") or ""
+    r = float(row.get("radius") or meta.get("radius") or 0.0)
+    if shader == "ksGrass":
+        return 0.0, 250.0
+    if (shader == "ksTree" or meta.get("alpha_test")) and 0.0 < r <= 300.0:
+        return 0.0, 800.0
+    if 0.0 < r <= 30.0:
+        return 0.0, 600.0
+    return 0.0, 0.0
 
 
 # GTR2 track UI image dimensions (measured from stock Monza, Barcelona, Magione):
@@ -767,6 +854,8 @@ def main():
     ap.add_argument("--strip-unused-gmt-data",
                     action=argparse.BooleanOptionalAction, default=None,
                     help="strip unused collision FaceData/NormalData on CollTarget=False GMTs and dummy UVTangents on flat-normal cutouts (default from ac2gtr2.ini / true)")
+    ap.add_argument("--track-shadows", choices=("compact", "off", "full"), default=None,
+                    help="GTR2 track shadow casting mode: compact (default), off, or full (overrides ac2gtr2.ini [track] track_shadows)")
     args = ap.parse_args()
 
     import steam_paths
@@ -788,6 +877,10 @@ def main():
         raise SystemExit("--mesh-coarsening: %s" % exc)
     if args.strip_unused_gmt_data is None:
         args.strip_unused_gmt_data = _cfg["strip_unused_gmt_data"]
+    if args.track_shadows is None:
+        args.track_shadows = _cfg["track_shadows"]
+    else:
+        args.track_shadows = steam_paths.validate_track_shadows(args.track_shadows)
 
     out_dir = os.path.abspath(args.out_dir)
     venue = os.path.basename(out_dir)
@@ -812,9 +905,23 @@ def main():
                    else flags.get(row.get("mesh")))
             if cur is not None:
                 row["render"] = cur.get("render", True)
-                row["shadow"] = shadow_caster(cur, cutouts)
                 row["lod_in"] = cur.get("lod_in", 0.0)
                 row["lod_out"] = cur.get("lod_out", 0.0)
+                row["shadow"] = shadow_caster(
+                    cur, cutouts, mode=args.track_shadows,
+                    radius=row.get("radius", 0.0), tris=row.get("tris", 0),
+                )
+                row["shadow_receiver"] = is_shadow_receiver(cur, row, mode=args.track_shadows)
+                row["_meta"] = cur
+            else:
+                row["shadow"] = None
+                row["shadow_receiver"] = is_shadow_receiver(None, row, mode=args.track_shadows)
+                row["_meta"] = None
+    else:
+        for row in exported:
+            row["shadow"] = None
+            row["shadow_receiver"] = is_shadow_receiver(None, row, mode=args.track_shadows)
+            row["_meta"] = None
 
     stage = os.path.join(out_dir, "gtr2", venue)
     if os.path.isdir(stage):
@@ -842,12 +949,18 @@ def main():
     exported.sort(key=lambda r: (bool(r.get("blend")), -float(r.get("radius", 0.0))))
 
     skybox = stage_skybox(gmts)
-    lines = [TRK_HEADER.format(venue=venue, mas_files=mas_files, skybox=skybox)]
+    max_shadow_range = 250.0 if args.track_shadows == "full" else 200.0
+    lines = [TRK_HEADER.format(
+        venue=venue, mas_files=mas_files, skybox=skybox,
+        max_shadow_range=max_shadow_range,
+    )]
     used_instances = {
         "skyboxi", "day", "night", "sunrise", "sunset", "sun", "moon",
         "dayr", "nightr", "sunriser", "sunsetr", "xpitin", "xpitout",
     }
     phys = 0
+    casters = 0
+    receivers = 0
     for row in exported:
         name = instance_identifier(os.path.splitext(row["gmt"])[0], used_instances)
         coll = "True" if row["physical"] else "False"
@@ -873,12 +986,18 @@ def main():
             )
             continue
 
-        lin = float(row.get("lod_in") or 0.0)
-        lout = float(row.get("lod_out") or 0.0)
+        lin, lout = gtr2_lod_range(row.get("_meta"), row)
         extra = (" LODIn=(%.1f) LODOut=(%.1f)" % (lin, lout)) if lout > 0.0 else ""
-        extra += " ShadowReceiver=True"
-        if row.get("shadow"):
-            extra += " ShadowCaster=(Static, %s, 128, 128)" % row["shadow"]
+        if row.get("shadow_receiver"):
+            extra += " ShadowReceiver=True"
+            receivers += 1
+        else:
+            extra += " ShadowReceiver=False"
+        sc = row.get("shadow")
+        if sc:
+            kind, size = sc
+            extra += " ShadowCaster=(Static, %s, %d, %d)" % (kind, size, size)
+            casters += 1
         lines.append("Instance=%s\n{\n  MeshFile=%s CollTarget=%s HATTarget=%s%s\n}\n"
                      % (name, row["gmt"], coll, hat, extra))
     if not args.minimal:
@@ -947,6 +1066,8 @@ def main():
 
     print("staged %s" % stage)
     print("  instances   %d  (%d collidable)" % (len(exported), phys))
+    print("  shadows     mode=%s, %d casters, %d receivers (MaxShadowRange=%.0fm)"
+          % (args.track_shadows, casters, receivers, max_shadow_range))
     print("  gmt files   %d" % n_gmt)
     print("  textures    %d" % n_tex)
     print("  waypoints   %s" % ("yes" if has_aiw else "MISSING"))

@@ -38,6 +38,19 @@ DEFAULT_TEXTURE_SCALE_MIN_SIZE = 1024
 DEFAULT_ROAD_SMOOTHNESS = 0.5
 DEFAULT_MESH_COARSENING = 0.0
 DEFAULT_STRIP_UNUSED_GMT_DATA = True
+DEFAULT_TRACK_SHADOWS = "compact"
+VALID_TRACK_SHADOWS = ("compact", "off", "full")
+
+
+def validate_track_shadows(mode):
+    """Validate track_shadows mode ('compact', 'off', or 'full')."""
+    val = str(mode).strip().lower()
+    if val not in VALID_TRACK_SHADOWS:
+        raise ValueError(
+            "track_shadows must be one of %s, got %r"
+            % (", ".join(VALID_TRACK_SHADOWS), mode)
+        )
+    return val
 
 
 def parse_bool_option(raw, name):
@@ -213,6 +226,8 @@ def load_config(base_dir=None):
         "mesh_coarsening_source": "default",
         "strip_unused_gmt_data": DEFAULT_STRIP_UNUSED_GMT_DATA,
         "strip_unused_gmt_data_source": "default",
+        "track_shadows": DEFAULT_TRACK_SHADOWS,
+        "track_shadows_source": "default",
     }
     if not os.path.isfile(ini_path):
         return result
@@ -296,6 +311,10 @@ def load_config(base_dir=None):
             raw, "[track] strip_non_collidable_faces"
         )
         result["strip_unused_gmt_data_source"] = "ini"
+    if parser.has_option("track", "track_shadows"):
+        raw = parser.get("track", "track_shadows").strip()
+        result["track_shadows"] = validate_track_shadows(raw)
+        result["track_shadows_source"] = "ini"
     return result
 
 

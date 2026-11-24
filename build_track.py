@@ -227,6 +227,8 @@ def main():
     ap.add_argument("--strip-unused-gmt-data",
                     action=argparse.BooleanOptionalAction, default=None,
                     help="strip unused collision FaceData/NormalData on CollTarget=False GMTs and dummy UVTangents on flat-normal cutouts (default enabled; overrides ac2gtr2.ini [track] strip_unused_gmt_data)")
+    ap.add_argument("--track-shadows", choices=("compact", "off", "full"), default=None,
+                    help="GTR2 track shadow casting mode: compact (default), off, or full (overrides ac2gtr2.ini [track] track_shadows)")
     ap.add_argument("--grain", default="2")
     ap.add_argument("--detail-metres", default="2.0",
                     help="how often the game repeats a second stage detail texture")
@@ -290,6 +292,10 @@ def main():
             raise SystemExit("--mesh-coarsening: %s" % exc)
     if args.strip_unused_gmt_data is None:
         args.strip_unused_gmt_data = config["strip_unused_gmt_data"]
+    if args.track_shadows is None:
+        args.track_shadows = config["track_shadows"]
+    else:
+        args.track_shadows = steam_paths.validate_track_shadows(args.track_shadows)
 
     if not args.blender:
         args.blender = steam_paths.BLENDER
@@ -322,7 +328,8 @@ def main():
                              texture_scale_min_size=args.texture_scale_min_size,
                              road_smoothness=args.road_smoothness,
                              mesh_coarsening=args.mesh_coarsening,
-                             strip_unused_gmt_data=args.strip_unused_gmt_data):
+                             strip_unused_gmt_data=args.strip_unused_gmt_data,
+                             track_shadows=args.track_shadows):
         raise SystemExit(1)
     print("\nconverting %s" % track)
 
@@ -384,7 +391,8 @@ def main():
                     "--mesh-coarsening", repr(args.mesh_coarsening),
                     ("--strip-unused-gmt-data"
                      if args.strip_unused_gmt_data
-                     else "--no-strip-unused-gmt-data"))
+                     else "--no-strip-unused-gmt-data"),
+                    "--track-shadows", args.track_shadows)
     preview = track_preview(args.track_dir, args.layout)
     if preview:
         cmd += ["--preview", preview, "--texconv", steam_paths.TEXCONV]

@@ -409,6 +409,8 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             self.assertEqual(cfg["road_smoothness"], 0.5)
             self.assertEqual(cfg["mesh_coarsening"], 0.0)
             self.assertTrue(cfg["strip_unused_gmt_data"])
+            self.assertEqual(cfg["track_shadows"], "compact")
+            self.assertEqual(cfg["track_shadows_source"], "default")
 
             ini = os.path.join(root, "ac2gtr2.ini")
             with open(ini, "w", encoding="utf-8") as f:
@@ -418,6 +420,7 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
                     "road_smoothness=0\n"
                     "mesh_coarsening=0.5\n"
                     "strip_unused_gmt_data=false\n"
+                    "track_shadows=off\n"
                 )
             cfg = steam_paths.load_config(root)
             self.assertTrue(cfg["exists"])
@@ -426,6 +429,54 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             self.assertEqual(cfg["road_smooth_sigma"], 0.0)
             self.assertEqual(cfg["mesh_coarsening"], 0.5)
             self.assertFalse(cfg["strip_unused_gmt_data"])
+            self.assertEqual(cfg["track_shadows"], "off")
+            self.assertEqual(cfg["track_shadows_source"], "ini")
+
+    def test_gtr2_shadow_modes_and_receivers(self):
+        road_meta = {
+            "render": True, "cast_shadows": False, "decal": False, "backdrop": False,
+            "alpha_test": False, "needs_blend": False, "shader": "ksPerPixel",
+            "rf2_material": "road_asphalt", "ground_like": True, "upward": 1.0,
+        }
+        tree_meta = {
+            "render": True, "cast_shadows": True, "decal": False, "backdrop": False,
+            "alpha_test": True, "needs_blend": False, "shader": "ksTree",
+            "rf2_material": "tree_01", "ground_like": False, "upward": 0.0,
+        }
+        hut_meta = {
+            "render": True, "cast_shadows": True, "decal": False, "backdrop": False,
+            "alpha_test": False, "needs_blend": False, "shader": "ksPerPixel",
+            "rf2_material": "hut", "ground_like": False, "upward": 0.2,
+        }
+        cutouts = {"tree_01": 191}
+
+        # Road receives shadows in all modes; trees/huts do not in compact/off.
+        self.assertTrue(finalize_track.is_shadow_receiver(road_meta, {"render": True, "physical": True}, "compact"))
+        self.assertTrue(finalize_track.is_shadow_receiver(road_meta, {"render": True, "physical": True}, "off"))
+        self.assertFalse(finalize_track.is_shadow_receiver(tree_meta, {"render": True, "physical": False}, "compact"))
+        self.assertFalse(finalize_track.is_shadow_receiver(hut_meta, {"render": True, "physical": False}, "compact"))
+        self.assertTrue(finalize_track.is_shadow_receiver(hut_meta, {"render": True, "physical": False}, "full"))
+
+        # Compact casts only on compact opaque structures (<= 60 m, <= 8000 tris), never foliage.
+        self.assertIsNone(finalize_track.shadow_caster(tree_meta, cutouts, mode="compact", radius=15.0, tris=200))
+        self.assertEqual(finalize_track.shadow_caster(hut_meta, cutouts, mode="compact", radius=15.0, tris=200), ("Solid", 32))
+        self.assertEqual(finalize_track.shadow_caster(hut_meta, cutouts, mode="compact", radius=40.0, tris=200), ("Solid", 64))
+        self.assertIsNone(finalize_track.shadow_caster(hut_meta, cutouts, mode="compact", radius=80.0, tris=200))
+        self.assertIsNone(finalize_track.shadow_caster(hut_meta, cutouts, mode="compact", radius=15.0, tris=12000))
+
+        # Off disables all track casters.
+        self.assertIsNone(finalize_track.shadow_caster(hut_meta, cutouts, mode="off", radius=15.0, tris=200))
+
+        # Full enables Texture foliage casters up to 150 m at 64x64.
+        self.assertEqual(finalize_track.shadow_caster(tree_meta, cutouts, mode="full", radius=40.0, tris=500), ("Texture", 64))
+        self.assertIsNone(finalize_track.shadow_caster(tree_meta, cutouts, mode="full", radius=200.0, tris=500))
+
+        # Distance LOD culling: grass=250m, tree=800m, small prop=600m, road=0 (full range).
+        self.assertEqual(finalize_track.gtr2_lod_range(road_meta, {"physical": True, "radius": 20.0}), (0.0, 0.0))
+        self.assertEqual(finalize_track.gtr2_lod_range(tree_meta, {"physical": False, "radius": 100.0}), (0.0, 800.0))
+        self.assertEqual(finalize_track.gtr2_lod_range(hut_meta, {"physical": False, "radius": 15.0}), (0.0, 600.0))
+        grass_meta = dict(tree_meta, shader="ksGrass")
+        self.assertEqual(finalize_track.gtr2_lod_range(grass_meta, {"physical": False, "radius": 120.0}), (0.0, 250.0))
 
 
 if __name__ == "__main__":

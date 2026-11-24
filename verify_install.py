@@ -411,10 +411,11 @@ def main():
         problems.append("%d gmts keep a <= 1000 m visible range, e.g. %s"
                         % (len(short_range), short_range[:3]))
 
-    # 7. Shadow casters exist in .trk.
+    # 7. Ground/road shadow receivers exist (for car & track shadows).
     casters = scene.count("ShadowCaster=")
-    if not casters:
-        problems.append("no instance casts a shadow")
+    receivers = scene.count("ShadowReceiver=True")
+    if not receivers:
+        problems.append("no instance receives shadows (ShadowReceiver=True)")
 
     # 8. Instance= names must fit inside gMotor 2.0's 32-byte buffer (<= 31 chars + NUL).
     overlong_instances = [
@@ -434,7 +435,7 @@ def main():
     print("normals:     %d upright meshes checked, %d lit as if facing up"
           % (walls, len(sky_lit)))
     print("ranges:      %d gmts at <= 1000 m" % len(short_range))
-    print("shadows:     %d casters" % casters)
+    print("shadows:     %d casters, %d receivers" % (casters, receivers))
     print()
     if problems:
         print("PROBLEMS")

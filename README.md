@@ -81,7 +81,8 @@ Useful options:
   automatic discovery.
 - `--texconv "<path to texconv.exe>"` selects the texture conversion utility.
 - `--texture-scale`, `--texture-scale-min-size`, `--road-smoothness`,
-  `--mesh-coarsening`, and `--strip-unused-gmt-data` override `ac2gtr2.ini`.
+  `--mesh-coarsening`, `--strip-unused-gmt-data`, and `--track-shadows`
+  (`compact` / `off` / `full`) override `ac2gtr2.ini`.
 
 Check an installed result with:
 

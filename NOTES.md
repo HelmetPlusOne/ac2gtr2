@@ -87,3 +87,27 @@ GTR2 uses the global `GameData\Locations\specialfx.tec` with per-track
   - `<layout>Track.bmp` (145×83 32-bit bottom-up uncompressed RGBA TGA saved as `.bmp`)
 - `Instance=` names are capped at 31 characters to avoid gMotor 2.0's 32-byte
   `TInstance` name buffer overflow on track exit.
+
+## GTR2 projected shadows and spatial culling performance
+
+Measured across stock GTR2 tracks (`Monza`, `Barcelona`, `Spa`, `Bahrain`,
+`Magione`):
+- Stock tracks use small spatial chunks (Monza median radius 30 m, median
+  `LOD_Out` 550 m; Barcelona median radius 29 m, median `LOD_Out` 500 m),
+  `ShadowReceiver=True` only on road/ground (~9–25% of instances), and small
+  `ShadowCaster=` counts (8–45, mostly `16×16` or `32×32`, with 0–1 `Texture`
+  casters).
+- Because GTR2 renders a separate projected shadow texture per active
+  `ShadowCaster=` and runs an extra `L2ShadowProject` pass per overlapping
+  `(caster, receiver)` pair, emitting `ShadowCaster=(Static, ..., 128, 128)`
+  on ~90 large AC meshes + `ShadowReceiver=True` on ~96% of instances creates
+  severe CPU/draw-pass bottlenecks even with aggressive `mesh_coarsening`.
+- `blender_stage.py` now splits wide AC meshes (horizontal span > 375 m,
+  >= 200 tris) into 250 m horizontal spatial tiles so frustum culling,
+  `LODOut`, and `MaxShadowRange` work per tile.
+- `finalize_track.py` defaults to `track_shadows=compact`: `ShadowReceiver=True`
+  on road/ground only (preserving car shadows), `ShadowCaster=(Static, Solid,
+  32/64)` only on compact opaque structures (`<= 60 m` radius, `<= 8000` tris),
+  no foliage `Texture` casters, `MaxShadowRange=(200.0)`, `rearview ClipPlanes`
+  set to `(0.50, 400.00)`, and stock-like `LODOut` culling for grass (250 m),
+  foliage cutouts (800 m), and small props (600 m).

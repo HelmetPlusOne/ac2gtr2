@@ -23,8 +23,23 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import steam_paths
+
+
+def _rmtree_retry(path, attempts=5, delay=0.5):
+    """Remove a directory tree, retrying briefly on transient Windows locks."""
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if not os.path.exists(path):
+                return
+            if i + 1 == attempts:
+                raise
+            time.sleep(delay * (i + 1))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON_NAME = "io_rf2_gmt_release"
@@ -195,7 +210,7 @@ def main(argv=None):
 
     print("Recreating %s ..." % dist_dir, flush=True)
     if os.path.exists(dist_dir):
-        shutil.rmtree(dist_dir)
+        _rmtree_retry(dist_dir)
     os.makedirs(dist_dir, exist_ok=True)
 
     # 1. Copy Blender + embed io_rf2_gmt_release directly in Blender's addons folder.
@@ -204,7 +219,7 @@ def main(argv=None):
     shutil.copytree(blender_src, blender_dst, ignore=_ignore_blender)
     addon_dst = os.path.join(blender_dst, "3.6", "scripts", "addons", ADDON_NAME)
     if os.path.exists(addon_dst):
-        shutil.rmtree(addon_dst)
+        _rmtree_retry(addon_dst)
     print("Copying %s -> %s ..." % (ADDON_NAME, addon_dst), flush=True)
     shutil.copytree(addon_src, addon_dst, ignore=_ignore_pycache)
 
