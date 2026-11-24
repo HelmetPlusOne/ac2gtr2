@@ -40,6 +40,18 @@ DEFAULT_MESH_COARSENING = 0.0
 DEFAULT_STRIP_UNUSED_GMT_DATA = True
 DEFAULT_TRACK_SHADOWS = "compact"
 VALID_TRACK_SHADOWS = ("compact", "off", "full")
+DEFAULT_TRACK_BRIGHTNESS = 0.0
+
+
+def validate_track_brightness(brightness):
+    """Validate normalized track_brightness in [0.0, 1.0] and return float."""
+    value = float(brightness)
+    if not math.isfinite(value) or not (0.0 <= value <= 1.0):
+        raise ValueError(
+            "track_brightness must be between 0.0 and 1.0, got %r"
+            % (brightness,)
+        )
+    return value
 
 
 def validate_track_shadows(mode):
@@ -228,6 +240,8 @@ def load_config(base_dir=None):
         "strip_unused_gmt_data_source": "default",
         "track_shadows": DEFAULT_TRACK_SHADOWS,
         "track_shadows_source": "default",
+        "track_brightness": DEFAULT_TRACK_BRIGHTNESS,
+        "track_brightness_source": "default",
     }
     if not os.path.isfile(ini_path):
         return result
@@ -315,6 +329,21 @@ def load_config(base_dir=None):
         raw = parser.get("track", "track_shadows").strip()
         result["track_shadows"] = validate_track_shadows(raw)
         result["track_shadows_source"] = "ini"
+    if parser.has_option("track", "track_brightness"):
+        raw = parser.get("track", "track_brightness").strip()
+        try:
+            brightness = float(raw)
+        except ValueError as exc:
+            raise ValueError(
+                "[track] track_brightness must be a number, got %r" % (raw,)
+            ) from exc
+        if not math.isfinite(brightness) or not (0.0 <= brightness <= 1.0):
+            raise ValueError(
+                "[track] track_brightness must be between 0.0 and 1.0, got %r"
+                % (brightness,)
+            )
+        result["track_brightness"] = brightness
+        result["track_brightness_source"] = "ini"
     return result
 
 

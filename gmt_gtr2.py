@@ -646,8 +646,95 @@ def _bbox_corners(bbox_min, bbox_max):
     )
 
 
+def _brighten_material_colors(m_colors, brightness):
+    """Lift GMT material Diffuse/Ambient RGB toward 1.0 by ``brightness`` in [0, 1].
+
+    Leaves alpha, specular, and emissive unchanged so transparency, specular
+    highlights, and night lighting stay natural.
+    """
+    b = float(brightness or 0.0)
+    if b <= 0.0:
+        return m_colors
+    b = min(1.0, b)
+    cols = list(struct.unpack("<16f", m_colors))
+    if max(cols[0], cols[1], cols[2], cols[4], cols[5], cols[6]) <= 0.0:
+        return m_colors
+    for i in (0, 1, 2, 4, 5, 6):
+        c = max(0.0, min(1.0, cols[i]))
+        cols[i] = c + (1.0 - c) * b
+    return struct.pack("<16f", *cols)
+
+
+def collect_diffuse_textures(gmt_dir):
+    """Return lowercased diffuse DDS basenames used in stage-0 slots of GTR2 GMTs.
+
+    Excludes skybox/gate helper GMTs, pseudo-textures (``MATH``), helper maps,
+    and any texture also bound to a bump or specular stage.
+    """
+    skip_gmts = {"skyboxi.gmt", "xpitin.gmt", "xpitout.gmt"}
+    skip_texs = {"math", "_invisible.dds", "_flat_nm.dds", "_flat_spec.dds", "_white.dds"}
+    diffuse = set()
+    protected = set()
+    if not os.path.isdir(gmt_dir):
+        return diffuse
+    for fname in os.listdir(gmt_dir):
+        if not fname.lower().endswith(".gmt") or fname.lower() in skip_gmts:
+            continue
+        path = os.path.join(gmt_dir, fname)
+        try:
+            with open(path, "rb") as f:
+                b = f.read()
+        except OSError:
+            continue
+        if not is_gtr2_gmt(b) or len(b) < GTR2_HEADER_SIZE:
+            continue
+        mat_off = struct.unpack_from("<I", b, 0)[0] + 4
+        if mat_off + 4 > len(b):
+            continue
+        nmat = struct.unpack_from("<I", b, mat_off)[0]
+        pos = mat_off + 4
+        for _ in range(nmat):
+            need = (GTR2_MAT_HEADER_SIZE + 3 * GTR2_SHADER_INFO_SIZE
+                    + GTR2_MAT_POST_SHADERS_PAD + 4)
+            if pos + need > len(b):
+                break
+            pos += GTR2_MAT_HEADER_SIZE
+            levels = []
+            for _lv in range(3):
+                tcnt = struct.unpack_from("<I", b, pos + 4)[0]
+                sh = b[pos + 8:pos + 72].split(b"\x00", 1)[0].decode(
+                    "ascii", errors="replace").upper()
+                levels.append((sh, tcnt))
+                pos += GTR2_SHADER_INFO_SIZE
+            pos += GTR2_MAT_POST_SHADERS_PAD
+            ntex = struct.unpack_from("<I", b, pos)[0]
+            pos += 4
+            tex_names = []
+            for _ in range(ntex):
+                if pos + GTR2_TEXTURE_SIZE > len(b):
+                    break
+                tname = b[pos:pos + 64].split(b"\x00", 1)[0].decode(
+                    "ascii", errors="replace").strip().lower()
+                tex_names.append(tname)
+                pos += GTR2_TEXTURE_SIZE
+            cursor = 0
+            for sh, tcnt in levels:
+                slice_tex = tex_names[cursor:cursor + tcnt]
+                cursor += tcnt
+                is_two_stage = "T0XT1" in sh
+                for ti, tname in enumerate(slice_tex):
+                    if not tname or tname in skip_texs:
+                        continue
+                    if ti == 0:
+                        diffuse.add(tname)
+                    elif (is_two_stage and ti >= 2) or (not is_two_stage and ti >= 1):
+                        protected.add(tname)
+    return diffuse - protected
+
+
 def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
-                        include_faces=True, drop_flat_tangents=False):
+                        include_faces=True, drop_flat_tangents=False,
+                        track_brightness=0.0):
     """Convert raw rF2 GMT v2.52 bytes to GTR2 GMT v2.10 bytes.
 
     Already-converted GTR2 GMT v2.10 inputs are returned unchanged.
@@ -711,7 +798,7 @@ def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
                 "truncated rF2 GMT material %d in %s" % (mi, label))
         m_name = data[pos:pos + 64]
         m_flags = struct.unpack_from("<I", data, pos + 64)[0] & ~MAT_FLAG_RF2_CARBODY
-        m_colors = data[pos + 68:pos + 132]
+        m_colors = _brighten_material_colors(data[pos + 68:pos + 132], track_brightness)
         src_blend, dst_blend = struct.unpack_from("<2I", data, pos + 132)
         spec_power = struct.unpack_from("<f", data, pos + 140)[0]
         rf2_shader = data[pos + 148:pos + 212].split(b"\x00", 1)[0].decode(
@@ -1009,13 +1096,14 @@ def make_quad_gtr2_gmt(name, corners, texture="_invisible.dds"):
 
 
 def convert_file(path, mesh_coarsening=0.0, include_faces=True,
-                 drop_flat_tangents=False):
+                 drop_flat_tangents=False, track_brightness=0.0):
     """Convert a GMT file on disk from rF2 v2.52 to GTR2 v2.10 in place."""
     with open(path, "rb") as f:
         original = f.read()
     converted = convert_rf2_to_gtr2(
         original, label=path, mesh_coarsening=mesh_coarsening,
-        include_faces=include_faces, drop_flat_tangents=drop_flat_tangents)
+        include_faces=include_faces, drop_flat_tangents=drop_flat_tangents,
+        track_brightness=track_brightness)
     if converted is not original:
         with open(path, "wb") as f:
             f.write(converted)
@@ -1024,7 +1112,7 @@ def convert_file(path, mesh_coarsening=0.0, include_faces=True,
 
 
 def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
-                   drop_flat_tangents=False):
+                   drop_flat_tangents=False, track_brightness=0.0):
     """Convert all loose GMT files under a staged GTR2 location to GMT v2.10.
 
     GTR2 uses unencrypted GMT v2.10 and DDS assets. When ``collidable_gmts``
@@ -1032,7 +1120,8 @@ def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
     keep FaceData/NormalData collision tables; non-collidable visual GMTs are
     converted with ``include_faces=False``. When ``drop_flat_tangents`` is
     True, flat-normal/flat-spec bump cutouts are downgraded to ``L2DIFFUSET0``
-    without UVTangents.
+    without UVTangents. When ``track_brightness`` > 0.0, material diffuse and
+    ambient RGB levels are lifted smoothly toward 1.0.
     """
     collidable = (
         {name.lower() for name in collidable_gmts}
@@ -1055,6 +1144,7 @@ def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
             mesh_coarsening=mesh_coarsening,
             include_faces=include_faces,
             drop_flat_tangents=drop_flat_tangents,
+            track_brightness=track_brightness,
         )
         with open(path, "rb") as f:
             head = f.read(GTR2_MAGIC_OFFSET + len(GTR2_GMT_MAGIC))

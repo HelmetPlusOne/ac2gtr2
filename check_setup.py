@@ -127,7 +127,8 @@ def check_blender(rep, blender):
 def check(track_dir=None, layout=None, blender=None, install=None,
           need_blender=True, texture_scale=None, texture_scale_min_size=None,
           road_smoothness=None, mesh_coarsening=None,
-          strip_unused_gmt_data=None, track_shadows=None):
+          strip_unused_gmt_data=None, track_shadows=None,
+          track_brightness=None):
     """Print one line per check; True when nothing is missing."""
     import steam_paths
     rep = Report()
@@ -163,6 +164,12 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         coarsen_fmt = _fmt("mesh_coarsening", mesh_coarsening)
         if active_coarsening == 0.0:
             coarsen_fmt += " (disabled)"
+        active_brightness = (
+            cfg["track_brightness"] if track_brightness is None else track_brightness
+        )
+        bright_fmt = _fmt("track_brightness", track_brightness)
+        if active_brightness == 0.0:
+            bright_fmt += " (disabled)"
         parts = [
             _fmt("texture_scale", texture_scale),
             _fmt("texture_scale_min_size", texture_scale_min_size),
@@ -170,6 +177,7 @@ def check(track_dir=None, layout=None, blender=None, install=None,
             coarsen_fmt,
             _fmt("strip_unused_gmt_data", strip_unused_gmt_data),
             _fmt("track_shadows", track_shadows),
+            bright_fmt,
         ]
         summary = ", ".join(parts)
         if cfg["exists"]:

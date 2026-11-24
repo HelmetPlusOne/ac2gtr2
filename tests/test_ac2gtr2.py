@@ -478,6 +478,126 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         grass_meta = dict(tree_meta, shader="ksGrass")
         self.assertEqual(finalize_track.gtr2_lod_range(grass_meta, {"physical": False, "radius": 120.0}), (0.0, 250.0))
 
+    def test_track_brightness_config_materials_gdb_and_dds(self):
+        # Config validation & INI loading.
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(steam_paths.load_config(tmp)["track_brightness"], 0.0)
+            with open(os.path.join(tmp, "ac2gtr2.ini"), "w", encoding="utf-8") as f:
+                f.write("[track]\ntrack_brightness=0.65\n")
+            cfg = steam_paths.load_config(tmp)
+            self.assertAlmostEqual(cfg["track_brightness"], 0.65)
+            self.assertEqual(cfg["track_brightness_source"], "ini")
+            with open(os.path.join(tmp, "ac2gtr2.ini"), "w", encoding="utf-8") as f:
+                f.write("[track]\ntrack_brightness=1.5\n")
+            with self.assertRaises(ValueError):
+                steam_paths.load_config(tmp)
+        with self.assertRaises(ValueError):
+            steam_paths.validate_track_brightness(-0.1)
+        with self.assertRaises(ValueError):
+            steam_paths.validate_track_brightness(float("nan"))
+
+        # .gdb lighting interpolation: 0.0 unchanged, 1.0 reaches 255 daytime ambient.
+        base_light = finalize_track.gdb_lighting_colors(165, 255, 0.0)
+        mid_light = finalize_track.gdb_lighting_colors(165, 255, 0.5)
+        max_light = finalize_track.gdb_lighting_colors(165, 255, 1.0)
+        self.assertEqual(base_light["day_amb"], (165, 165, 165))
+        self.assertEqual(mid_light["day_amb"], (210, 210, 210))
+        self.assertEqual(max_light["day_amb"], (255, 255, 255))
+        self.assertGreater(max_light["sunrise_amb"][0], base_light["sunrise_amb"][0])
+        self.assertGreater(max_light["rain_day_amb"][0], base_light["rain_day_amb"][0])
+
+        # GMT material colors: 0.0 byte-exact, 0.5 halfway, 1.0 full diffuse/ambient,
+        # preserving alpha, specular, and emissive.
+        raw_cols = struct.pack(
+            "<16f",
+            0.40, 0.50, 0.60, 0.85,   # diffuse
+            0.20, 0.30, 0.40, 0.75,   # ambient
+            0.10, 0.10, 0.10, 1.00,   # specular
+            0.00, 0.00, 0.00, 1.00,   # emissive
+        )
+        self.assertEqual(gmt_gtr2._brighten_material_colors(raw_cols, 0.0), raw_cols)
+        mid_cols = struct.unpack("<16f", gmt_gtr2._brighten_material_colors(raw_cols, 0.5))
+        self.assertAlmostEqual(mid_cols[0], 0.70, places=5)
+        self.assertAlmostEqual(mid_cols[4], 0.60, places=5)
+        self.assertAlmostEqual(mid_cols[3], 0.85, places=5)
+        self.assertAlmostEqual(mid_cols[8], 0.10, places=5)
+        self.assertAlmostEqual(mid_cols[12], 0.00, places=5)
+        max_cols = struct.unpack("<16f", gmt_gtr2._brighten_material_colors(raw_cols, 1.0))
+        self.assertEqual(tuple(round(x, 5) for x in max_cols[:3]), (1.0, 1.0, 1.0))
+        self.assertEqual(tuple(round(x, 5) for x in max_cols[4:7]), (1.0, 1.0, 1.0))
+        self.assertAlmostEqual(max_cols[12], 0.00, places=5)
+
+        # DXT1 & DXT5 RGB565 endpoint brightening: preserves headers, alpha blocks,
+        # and DXT1 opaque vs 1-bit transparent ordering across edge cases.
+        with tempfile.TemporaryDirectory() as tmp:
+            def _make_dds(fourcc, blocks_bytes):
+                hdr = bytearray(128)
+                hdr[0:4] = b"DDS "
+                struct.pack_into("<I", hdr, 4, 124)
+                struct.pack_into("<III", hdr, 12, 4, 8, len(blocks_bytes))
+                struct.pack_into("<I", hdr, 28, 1)
+                hdr[84:88] = fourcc
+                return bytes(hdr) + blocks_bytes
+
+            # DXT1: block 0 opaque normal (c0 > c1), block 1 opaque crossing/collapsing
+            # near white (c0 > c1), block 2 transparent (c0 <= c1).
+            dxt1_blocks = (
+                struct.pack("<HHI", (12 << 11) | (20 << 5) | 10, (6 << 11) | (10 << 5) | 5, 0x12345678)
+                + struct.pack("<HHI", (30 << 11) | (58 << 5) | 28, (29 << 11) | (62 << 5) | 30, 0xAAAAAAAA)
+                + struct.pack("<HHI", (8 << 11) | (16 << 5) | 8, (14 << 11) | (28 << 5) | 14, 0xE4E4E4E4)
+            )
+            p1 = os.path.join(tmp, "test_dxt1.dds")
+            orig_dxt1 = _make_dds(b"DXT1", dxt1_blocks)
+            with open(p1, "wb") as f:
+                f.write(orig_dxt1)
+            self.assertFalse(finalize_track.brighten_dds_rgb565(p1, 0.0))
+            with open(p1, "rb") as f:
+                self.assertEqual(f.read(), orig_dxt1)
+
+            self.assertTrue(finalize_track.brighten_dds_rgb565(p1, 1.0))
+            with open(p1, "rb") as f:
+                out_dxt1 = f.read()
+            self.assertEqual(len(out_dxt1), len(orig_dxt1))
+            self.assertEqual(out_dxt1[:128], orig_dxt1[:128])
+            b0_c0, b0_c1, _ = struct.unpack_from("<HHI", out_dxt1, 128)
+            b1_c0, b1_c1, _ = struct.unpack_from("<HHI", out_dxt1, 136)
+            b2_c0, b2_c1, _ = struct.unpack_from("<HHI", out_dxt1, 144)
+            self.assertGreater(b0_c0, (12 << 11) | (20 << 5) | 10)
+            self.assertGreater(b0_c0, b0_c1)   # opaque stayed opaque
+            self.assertGreater(b1_c0, b1_c1)   # saturated opaque never flipped to transparent
+            self.assertLessEqual(b2_c0, b2_c1) # 1-bit transparent stayed transparent
+
+            # DXT5: alpha block bytes 0..8 must be untouched.
+            alpha_block = bytes([0xAA, 0x55, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
+            color_block = struct.pack("<HHI", (10 << 11) | (20 << 5) | 10, (4 << 11) | (8 << 5) | 4, 0x0F0F0F0F)
+            p5 = os.path.join(tmp, "test_dxt5.dds")
+            orig_dxt5 = _make_dds(b"DXT5", alpha_block + color_block)
+            with open(p5, "wb") as f:
+                f.write(orig_dxt5)
+            self.assertTrue(finalize_track.brighten_dds_rgb565(p5, 0.7))
+            with open(p5, "rb") as f:
+                out_dxt5 = f.read()
+            self.assertEqual(out_dxt5[128:136], alpha_block)
+            c0_new, c1_new, idx_new = struct.unpack_from("<HHI", out_dxt5, 136)
+            self.assertGreater(c0_new, (10 << 11) | (20 << 5) | 10)
+            self.assertEqual(idx_new, 0x0F0F0F0F)
+
+            # collect_diffuse_textures picks stage-0 diffuse and excludes bump/spec.
+            rf2_bytes = _make_rf2_gmt(
+                shader="L2BUMPSPECMAPT0",
+                textures=[
+                    ("road_diff.dds", 0x18, 1, 3, 0, 0),
+                    ("road_spec.dds", 0x18, 1, 3, 0, 0),
+                    ("road_nm.dds", 0x18, 1, 3, 0, 0),
+                ],
+            )
+            gmt_dir = os.path.join(tmp, "gmt")
+            os.makedirs(gmt_dir)
+            with open(os.path.join(gmt_dir, "road.gmt"), "wb") as f:
+                f.write(gmt_gtr2.convert_rf2_to_gtr2(rf2_bytes, track_brightness=0.5))
+            diff_texs = gmt_gtr2.collect_diffuse_textures(gmt_dir)
+            self.assertEqual(diff_texs, {"road_diff.dds"})
+
 
 if __name__ == "__main__":
     unittest.main()

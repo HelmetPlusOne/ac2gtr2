@@ -111,3 +111,20 @@ Measured across stock GTR2 tracks (`Monza`, `Barcelona`, `Spa`, `Bahrain`,
   no foliage `Texture` casters, `MaxShadowRange=(200.0)`, `rearview ClipPlanes`
   set to `(0.50, 400.00)`, and stock-like `LODOut` culling for grass (250 m),
   foliage cutouts (800 m), and small props (600 m).
+
+## Track brightness boost (`track_brightness`)
+
+- `[track] track_brightness` (and `--track-brightness`) accepts `[0.0, 1.0]`,
+  defaulting to `0.0` (disabled, byte-for-byte unchanged output).
+- When `> 0.0`, three GTR2 lighting levers are raised smoothly together during
+  `finalize_track.py` (so it also works with `--skip-geometry`):
+  1. **GMT material colors** (`gmt_gtr2.py`): lifts `Diffuse` and `Ambient` RGB
+     from AC's lower reflectance values toward `1.0` (keeping alpha, specular,
+     and emissive unchanged so night racing stays dark).
+  2. **Scene `.gdb` lighting** (`finalize_track.py`): lifts daytime, sunrise,
+     sunset, and rainy-day ambient lighting (`DayAmbientColour` up to `255` at
+     `1.0`), leaving `NightAmbientColour` untouched.
+  3. **Diffuse DDS textures** (`finalize_track.py`): brightens stage-0 diffuse
+     `DXT1`/`DXT3`/`DXT5` textures directly on their RGB565 endpoints across all
+     mipmaps (preserving DXT3/DXT5 alpha blocks, DXT1 opaque vs 1-bit alpha
+     semantics, and excluding bump/specular/helper textures).

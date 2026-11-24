@@ -119,7 +119,7 @@ GDB = """{layout}
 
   SkyBlendSunAngles = (-20.5, -1.0, 11.5, 25.5)
 
-  SunriseAmbientColour = (146,138,125)
+  SunriseAmbientColour = ({sunrise_amb[0]},{sunrise_amb[1]},{sunrise_amb[2]})
   SunriseDirectionalColour = (229,204,178)
   SunriseFogColour = (30,35,55)
   SunriseFogIn = 0.0
@@ -130,18 +130,18 @@ GDB = """{layout}
   RainSunriseFogIn = -10.0
   RainSunriseFogOut = 650.0
 
-  DayAmbientColour = ({amb},{amb},{amb})
-  DayDirectionalColour = ({sun},{sun},{sun})
+  DayAmbientColour = ({day_amb[0]},{day_amb[1]},{day_amb[2]})
+  DayDirectionalColour = ({day_sun[0]},{day_sun[1]},{day_sun[2]})
   DayFogColour = (185,211,243)
   DayFogIn = 250.0
   DayFogOut = 4500.0
-  RainDayAmbientColour = (105,105,105)
-  RainDayDirectionalColour = (45,45,45)
+  RainDayAmbientColour = ({rain_day_amb[0]},{rain_day_amb[1]},{rain_day_amb[2]})
+  RainDayDirectionalColour = ({rain_day_sun[0]},{rain_day_sun[1]},{rain_day_sun[2]})
   RainDayFogColour = (77,80,81)
   RainDayFogIn = -25.0
   RainDayFogOut = 1050.0
 
-  SunsetAmbientColour = (136,121,105)
+  SunsetAmbientColour = ({sunset_amb[0]},{sunset_amb[1]},{sunset_amb[2]})
   SunsetDirectionalColour = (220,190,150)
   SunsetFogColour = (60,63,75)
   SunsetFogIn = 100.0
@@ -382,6 +382,157 @@ def gtr2_lod_range(meta, row):
     if 0.0 < r <= 30.0:
         return 0.0, 600.0
     return 0.0, 0.0
+
+
+def _lerp_rgb(base, target, t):
+    return tuple(
+        max(0, min(255, int(round(a + (b - a) * t))))
+        for a, b in zip(base, target)
+    )
+
+
+def gdb_lighting_colors(ambient=165, sun=255, brightness=0.0):
+    """Compute GTR2 .gdb scene lighting RGB tuples for ``brightness`` in [0, 1].
+
+    At ``brightness == 0.0`` returns exact baseline colors. Higher values lift
+    daytime, sunrise/sunset, and rainy-day ambient light while keeping night
+    lighting dark.
+    """
+    b = max(0.0, min(1.0, float(brightness or 0.0)))
+    amb = max(0, min(255, int(ambient)))
+    sn = max(0, min(255, int(sun)))
+    return {
+        "day_amb": _lerp_rgb((amb, amb, amb), (255, 255, 255), b),
+        "day_sun": _lerp_rgb((sn, sn, sn), (255, 255, 255), b),
+        "sunrise_amb": _lerp_rgb((146, 138, 125), (225, 215, 198), b),
+        "sunset_amb": _lerp_rgb((136, 121, 105), (220, 200, 172), b),
+        "rain_day_amb": _lerp_rgb((105, 105, 105), (190, 190, 190), b),
+        "rain_day_sun": _lerp_rgb((45, 45, 45), (135, 135, 135), b),
+    }
+
+
+def _rgb565_brightness_luts(brightness):
+    """Build monotonic RGB565 channel lookup tables (5-bit R/B, 6-bit G)."""
+    import numpy as np
+
+    b = max(0.0, min(1.0, float(brightness)))
+    gain = 1.0 + 0.80 * b
+    gamma = 1.0 - 0.35 * b
+
+    def _curve(max_val):
+        x = np.arange(max_val + 1, dtype=np.float64) / float(max_val)
+        y = np.power(np.clip(x * gain, 0.0, 1.0), gamma)
+        return np.clip(np.rint(y * max_val), 0, max_val).astype(np.uint16)
+
+    return _curve(31), _curve(63)
+
+
+def brighten_dds_rgb565(path, brightness, luts=None):
+    """Brighten a DX9 DXT1/DXT3/DXT5 DDS file in-place via its RGB565 endpoints.
+
+    Preserves the 128-byte DDS header, mipmap chain, DXT3/DXT5 alpha blocks,
+    and DXT1 opaque vs 1-bit punch-through alpha semantics bit-for-bit.
+    Returns True when the file was modified.
+    """
+    b = float(brightness or 0.0)
+    if b <= 0.0:
+        return False
+    import numpy as np
+
+    with open(path, "rb") as f:
+        raw = bytearray(f.read())
+    if len(raw) < 128 or raw[:4] != b"DDS ":
+        return False
+    fourcc = bytes(raw[84:88])
+    if fourcc == b"DXT1":
+        block_size, color_off = 8, 0
+    elif fourcc in (b"DXT3", b"DXT5"):
+        block_size, color_off = 16, 8
+    else:
+        return False
+
+    payload_len = len(raw) - 128
+    nblocks = payload_len // block_size
+    if nblocks <= 0:
+        return False
+
+    lut5, lut6 = luts if luts is not None else _rgb565_brightness_luts(b)
+    buf = np.frombuffer(raw, dtype=np.uint8, offset=128, count=nblocks * block_size)
+    blocks = buf.reshape(nblocks, block_size)
+    cbytes = blocks[:, color_off:color_off + 4].view("<u2").reshape(nblocks, 2)
+    c0 = cbytes[:, 0].copy()
+    c1 = cbytes[:, 1].copy()
+
+    def _map_rgb565(c):
+        r = lut5[(c >> 11) & 0x1F]
+        g = lut6[(c >> 5) & 0x3F]
+        bl = lut5[c & 0x1F]
+        return ((r << 11) | (g << 5) | bl).astype(np.uint16)
+
+    nc0 = _map_rgb565(c0)
+    nc1 = _map_rgb565(c1)
+
+    if fourcc == b"DXT1":
+        idx = blocks[:, 4:8].view("<u4").reshape(nblocks)
+        was_opaque = c0 > c1
+
+        # Opaque block whose endpoints crossed (nc0 < nc1): swap + flip 2-bit indices.
+        swap_op = was_opaque & (nc0 < nc1)
+        if np.any(swap_op):
+            tmp = nc0[swap_op].copy()
+            nc0[swap_op] = nc1[swap_op]
+            nc1[swap_op] = tmp
+            idx[swap_op] ^= np.uint32(0x55555555)
+
+        # Opaque block whose endpoints collapsed (nc0 == nc1): keep nc0 > nc1
+        # so index 3 never flips to 1-bit transparent black.
+        eq_op = was_opaque & (nc0 == nc1)
+        if np.any(eq_op):
+            gt0 = eq_op & (nc0 > 0)
+            nc1[gt0] = nc0[gt0] - np.uint16(1)
+            eq0 = eq_op & (nc0 == 0)
+            nc0[eq0] = np.uint16(1)
+
+        # 1-bit transparent block (c0 <= c1) whose endpoints crossed (nc0 > nc1):
+        # swap endpoints and swap index codes 00 <-> 01 while preserving 10 & 11.
+        swap_tr = (~was_opaque) & (nc0 > nc1)
+        if np.any(swap_tr):
+            tmp = nc0[swap_tr].copy()
+            nc0[swap_tr] = nc1[swap_tr]
+            nc1[swap_tr] = tmp
+            t_idx = idx[swap_tr]
+            low_mask = ((~t_idx) >> np.uint32(1)) & np.uint32(0x55555555)
+            idx[swap_tr] = t_idx ^ low_mask
+
+    cbytes[:, 0] = nc0
+    cbytes[:, 1] = nc1
+
+    with open(path, "wb") as f:
+        f.write(raw)
+    return True
+
+
+def brighten_staged_diffuse_textures(stage, brightness):
+    """Brighten all diffuse stage-0 DDS files in ``stage/maps`` for GTR2."""
+    b = float(brightness or 0.0)
+    if b <= 0.0:
+        return 0
+    import gmt_gtr2
+
+    gmt_dir = os.path.join(stage, "gmt")
+    map_dir = os.path.join(stage, "maps")
+    if not os.path.isdir(map_dir):
+        return 0
+    diffuse = gmt_gtr2.collect_diffuse_textures(gmt_dir)
+    if not diffuse:
+        return 0
+    luts = _rgb565_brightness_luts(b)
+    changed = 0
+    for fname in sorted(os.listdir(map_dir)):
+        if fname.lower() in diffuse and fname.lower().endswith(".dds"):
+            if brighten_dds_rgb565(os.path.join(map_dir, fname), b, luts=luts):
+                changed += 1
+    return changed
 
 
 # GTR2 track UI image dimensions (measured from stock Monza, Barcelona, Magione):
@@ -856,6 +1007,8 @@ def main():
                     help="strip unused collision FaceData/NormalData on CollTarget=False GMTs and dummy UVTangents on flat-normal cutouts (default from ac2gtr2.ini / true)")
     ap.add_argument("--track-shadows", choices=("compact", "off", "full"), default=None,
                     help="GTR2 track shadow casting mode: compact (default), off, or full (overrides ac2gtr2.ini [track] track_shadows)")
+    ap.add_argument("--track-brightness", type=float, default=None,
+                    help="track brightness boost in [0.0, 1.0] (0.0 disabled, 1.0 very bright; overrides ac2gtr2.ini [track] track_brightness)")
     args = ap.parse_args()
 
     import steam_paths
@@ -881,6 +1034,13 @@ def main():
         args.track_shadows = _cfg["track_shadows"]
     else:
         args.track_shadows = steam_paths.validate_track_shadows(args.track_shadows)
+    if args.track_brightness is None:
+        args.track_brightness = _cfg["track_brightness"]
+    else:
+        try:
+            args.track_brightness = steam_paths.validate_track_brightness(args.track_brightness)
+        except ValueError as exc:
+            raise SystemExit("--track-brightness: %s" % exc)
 
     out_dir = os.path.abspath(args.out_dir)
     venue = os.path.basename(out_dir)
@@ -1007,6 +1167,9 @@ def main():
     rumble_dry = float(surface_grips.get("rmbl", 0.96))
     lap_sec = max(30.0, (lap_km * 1000.0) / 42.0) if lap_km > 0 else 100.0
 
+    lighting = gdb_lighting_colors(
+        ambient=args.ambient, sun=args.sun, brightness=args.track_brightness
+    )
     write(os.path.join(stage, layout + ".trk"), "\n".join(lines))
     write(os.path.join(stage, layout + ".gdb"),
           GDB.format(
@@ -1015,8 +1178,12 @@ def main():
               km=lap_km,
               mi=lap_km * 0.621371,
               hour=args.hour,
-              amb=args.ambient,
-              sun=args.sun,
+              day_amb=lighting["day_amb"],
+              day_sun=lighting["day_sun"],
+              sunrise_amb=lighting["sunrise_amb"],
+              sunset_amb=lighting["sunset_amb"],
+              rain_day_amb=lighting["rain_day_amb"],
+              rain_day_sun=lighting["rain_day_sun"],
               lap_sec=lap_sec,
               race_sec=lap_sec * 1.02,
               road_dry=road_dry,
@@ -1106,6 +1273,7 @@ def main():
         mesh_coarsening=args.mesh_coarsening,
         collidable_gmts=collidable_gmts,
         drop_flat_tangents=bool(args.strip_unused_gmt_data),
+        track_brightness=args.track_brightness,
     )
     if collidable_gmts is not None:
         visual_stripped = max(0, n_gmt - len(collidable_gmts - {"xpitin.gmt", "xpitout.gmt", "skyboxi.gmt"}))
@@ -1113,6 +1281,10 @@ def main():
               % (converted, visual_stripped))
     else:
         print("  converted   %d GMT files to GTR2 v2.10 (unused GMT data stripping disabled)" % converted)
+    if args.track_brightness > 0.0:
+        bright_tex = brighten_staged_diffuse_textures(stage, args.track_brightness)
+        print("  brightness  track_brightness=%.2f (DayAmbient=%s, lifted %d diffuse DDS textures + GMT materials)"
+              % (args.track_brightness, lighting["day_amb"][0], bright_tex))
 
     if args.install:
         try:
