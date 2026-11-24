@@ -1,0 +1,5 @@
+out/
+dist/
+work/
+__pycache__/
+.venv/
