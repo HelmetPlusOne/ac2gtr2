@@ -1,4 +1,4 @@
-# AC to GTR2 — Standalone Converter
+# Assetto Corsa to GTR2 — Standalone Converter
 
 Standalone Windows distribution for converting Assetto Corsa (AC) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC track folder onto `ac2gtr2.exe`.
 
