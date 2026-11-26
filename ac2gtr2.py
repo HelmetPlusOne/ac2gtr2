@@ -128,21 +128,22 @@ def _prompt_layout(track_dir):
     if not os.path.isdir(track_dir):
         return None
     ttype = rf1_track.detect_track_type(track_dir)
+    is_gmotor = ttype in ("rf1", "sce")
     available = check_setup.layouts(track_dir)
-    if not available or (ttype == "rf1" and len(available) <= 1):
+    if not available or (is_gmotor and len(available) <= 1):
         return None
     if not (sys.stdin and sys.stdin.isatty()):
         return None
 
     has_default = (
-        ttype == "rf1"
+        is_gmotor
         or os.path.exists(os.path.join(track_dir, "models.ini"))
         or os.path.isdir(os.path.join(track_dir, "ai"))
     )
     print("\nTrack '%s' has multiple layouts:" % os.path.basename(os.path.normpath(track_dir)))
     for idx, name in enumerate(available, 1):
         print("  %d. %s" % (idx, name))
-    default_label = "all layouts" if ttype == "rf1" else "default"
+    default_label = "all layouts" if is_gmotor else "default"
     prompt = (
         "Choose layout (name or number, Enter for %s): " % default_label
         if has_default

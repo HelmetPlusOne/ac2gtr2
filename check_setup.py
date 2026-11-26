@@ -47,7 +47,7 @@ class Report:
 
 def layouts(track_dir):
     import rf1_track
-    if rf1_track.detect_track_type(track_dir) == "rf1":
+    if rf1_track.detect_track_type(track_dir) in ("rf1", "sce"):
         return rf1_track.rf1_layout_names(track_dir)
     return sorted(f[len("models_"):-len(".ini")] for f in os.listdir(track_dir)
                   if f.lower().startswith("models_") and f.lower().endswith(".ini"))
@@ -69,23 +69,24 @@ def check_track(rep, track_dir, layout):
         return
     name = os.path.basename(os.path.normpath(track_dir))
     ttype = rf1_track.detect_track_type(track_dir)
-    if ttype == "rf1":
+    if ttype in ("rf1", "sce"):
+        label = "Stock Car Extreme" if ttype == "sce" else "rFactor 1"
         have = rf1_track.rf1_layout_names(track_dir)
         if layout:
             matched = [h for h in have if h.casefold() == layout.casefold()]
             if not matched:
-                rep.problem("rFactor 1 track %s has no layout called %r" % (name, layout),
+                rep.problem("%s track %s has no layout called %r" % (label, name, layout),
                             "Its layouts: %s" % (", ".join(have) or "none"))
                 return
-            rep.ok("rFactor 1 track %s, layout %s" % (name, matched[0]))
+            rep.ok("%s track %s, layout %s" % (label, name, matched[0]))
         else:
-            rep.ok("rFactor 1 track %s (%d layout%s: %s)"
-                   % (name, len(have), "" if len(have) == 1 else "s", ", ".join(have)))
+            rep.ok("%s track %s (%d layout%s: %s)"
+                   % (label, name, len(have), "" if len(have) == 1 else "s", ", ".join(have)))
         return
     if not any(f.lower().endswith(".kn5") for f in os.listdir(track_dir)):
-        rep.problem("no Assetto Corsa (.kn5) or rFactor 1 (.scn + .gdb) track found in %s" % track_dir,
-                    "Give an AC track folder (containing .kn5) or an rFactor 1 track folder "
-                    "(containing .scn + .gdb layouts).")
+        rep.problem("no Assetto Corsa (.kn5), rFactor 1, or Stock Car Extreme (.scn + .gdb) track found in %s" % track_dir,
+                    "Give an AC track folder (containing .kn5) or an rFactor 1 / Stock Car Extreme "
+                    "track folder (containing .scn + .gdb layouts).")
         return
     have = sorted(f[len("models_"):-len(".ini")] for f in os.listdir(track_dir)
                   if f.lower().startswith("models_") and f.lower().endswith(".ini"))
@@ -156,7 +157,8 @@ def check(track_dir=None, layout=None, blender=None, install=None,
 
     if track_type is None and track_dir and os.path.isdir(track_dir):
         track_type = rf1_track.detect_track_type(track_dir)
-    is_rf1 = (track_type == "rf1")
+    is_rf1 = track_type in ("rf1", "sce")
+    is_sce = (track_type == "sce")
 
     try:
         cfg = steam_paths.load_config()
@@ -173,7 +175,8 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         return "%s=%s [%s]" % (key, cfg_val if cli_val is None else cli_val, tag)
 
     if is_rf1:
-        rep.ok("input type     rFactor 1 (track_shadows enabled; other AC options disabled/ignored)")
+        kind_label = "Stock Car Extreme" if is_sce else "rFactor 1"
+        rep.ok("input type     %s (track_shadows enabled; other AC options disabled/ignored)" % kind_label)
         if cfg is not None:
             summary = _fmt("track_shadows", track_shadows)
             if cfg["exists"]:
@@ -261,6 +264,17 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         else:
             rep.problem("masunpack.exe not found at %s" % steam_paths.MASUNPACK,
                         "Pass --masunpack \"<path to masunpack.exe>\" or set AC2GTR2_MASUNPACK")
+        if is_sce:
+            if os.path.isfile(steam_paths.RFACTORCRYPT):
+                rep.ok("rfactorcrypt   %s" % steam_paths.RFACTORCRYPT)
+            else:
+                rep.problem("rfactorcrypt.exe not found at %s" % steam_paths.RFACTORCRYPT,
+                            "Pass --rfactorcrypt \"<path to rfactorcrypt.exe>\" or set AC2GTR2_RFACTORCRYPT")
+            common_dirs = steam_paths.find_sce_common_dirs()
+            if common_dirs:
+                rep.ok("ReizaCommon    %s" % common_dirs[0])
+            else:
+                rep.note("ReizaCommon not found (missing shared SCE textures will use neutral fallbacks; pass --sce if installed)")
 
     if install:
         if os.path.isdir(install):
@@ -295,6 +309,8 @@ def main():
     ap.add_argument("--ac")
     ap.add_argument("--texconv")
     ap.add_argument("--masunpack")
+    ap.add_argument("--rfactorcrypt")
+    ap.add_argument("--sce")
     args = ap.parse_args()
     if args.gtr2:
         os.environ["AC2GTR2_GAME_DIR"] = os.path.abspath(args.gtr2)
@@ -304,6 +320,10 @@ def main():
         os.environ["AC2GTR2_TEXCONV"] = os.path.abspath(args.texconv)
     if args.masunpack:
         os.environ["AC2GTR2_MASUNPACK"] = os.path.abspath(args.masunpack)
+    if args.rfactorcrypt:
+        os.environ["AC2GTR2_RFACTORCRYPT"] = os.path.abspath(args.rfactorcrypt)
+    if args.sce:
+        os.environ["AC2GTR2_SCE_DIR"] = os.path.abspath(args.sce)
     import steam_paths
     if not args.blender:
         args.blender = steam_paths.BLENDER

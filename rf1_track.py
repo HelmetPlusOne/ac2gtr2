@@ -36,6 +36,19 @@ SKYBOX_GMTS = {
 }
 COMMON_MAS_NAMES = {"commonmaps.mas", "commonmaps.gtr"}
 
+
+def _is_skybox_gmt(filename_lower):
+    """True for rF1/SCE skybox meshes replaced by GTR2's SHARED skybox."""
+    return filename_lower in SKYBOX_GMTS or filename_lower.startswith("srpl_")
+
+
+def _is_skipped_mas(filename_lower):
+    """True for shared/sky MAS archives handled separately or replaced by GTR2 SHARED."""
+    return (
+        filename_lower in COMMON_MAS_NAMES
+        or filename_lower.startswith(("sky", "clouds"))
+    )
+
 RF1_GDB_TEMPLATE = """{layout}
 {{
   AI Vehicle Filter = {venue}
@@ -255,8 +268,32 @@ def find_rf1_layouts(track_dir):
     return track_dir, found
 
 
+_SCE_SCN_MARKER_RE = re.compile(
+    r"(?im)^\s*(?:SearchPath\s*=\s*.*ReizaCommon\b"
+    r"|MASFile\s*=\s*(?:AdPack\w*|CloudsLight|SkyTropical\w*)\.MAS\b)"
+)
+_SCE_GDB_MARKER_RE = re.compile(
+    r"(?im)^\s*Filter\s+Properties\s*=\s*.*\b(?:StockV8|StockCar|GSCE|Reiza)\b"
+)
+
+
+def _is_sce_layout(lay):
+    """Return True when an rF1-style layout carries Stock Car Extreme / Reiza markers."""
+    for path, pat in ((lay.get("scn"), _SCE_SCN_MARKER_RE), (lay.get("gdb"), _SCE_GDB_MARKER_RE)):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                head = f.read(4096)
+        except OSError:
+            continue
+        if pat.search(head):
+            return True
+    return False
+
+
 def detect_track_type(track_dir):
-    """Detect whether ``track_dir`` is an Assetto Corsa (``'ac'``) or rFactor 1 (``'rf1'``) track."""
+    """Detect whether ``track_dir`` is AC (``'ac'``), Stock Car Extreme (``'sce'``), or rFactor 1 (``'rf1'``)."""
     if not track_dir or not os.path.isdir(track_dir):
         return None
     try:
@@ -267,14 +304,237 @@ def detect_track_type(track_dir):
         return "ac"
     _root, layouts = find_rf1_layouts(track_dir)
     if layouts:
+        if any(_is_sce_layout(lay) for lay in layouts):
+            return "sce"
         return "rf1"
     return None
 
 
 def rf1_layout_names(track_dir):
-    """Return sorted layout names for an rFactor 1 track directory."""
+    """Return sorted layout names for an rFactor 1 or Stock Car Extreme track directory."""
     _root, layouts = find_rf1_layouts(track_dir)
     return [lay["name"] for lay in layouts]
+
+
+def _is_plain_tga(head):
+    """Return True when ``head`` looks like an unencrypted TGA image header."""
+    if len(head) < 18:
+        return False
+    color_map_type = head[1]
+    img_type = head[2]
+    w, h = struct.unpack_from("<HH", head, 12)
+    bpp = head[16]
+    return (
+        color_map_type in (0, 1)
+        and img_type in (1, 2, 3, 9, 10, 11)
+        and bpp in (8, 15, 16, 24, 32)
+        and 1 <= w <= 8192
+        and 1 <= h <= 8192
+    )
+
+
+def decrypt_sce_textures(map_dirs, rfactorcrypt=None):
+    """Decrypt any rfactorcrypt-encrypted texture files (.tga/.dds/.bmp) in-place.
+
+    Stock Car Extreme tracks often ship loose encrypted ``SKIDHARD.TGA`` files;
+    GTR2 crashes mid-load if it tries to parse an encrypted TGA header.
+    Returns the number of files decrypted.
+    """
+    suspects = []
+    for md in map_dirs:
+        if not md or not os.path.isdir(md):
+            continue
+        for fn in sorted(os.listdir(md)):
+            low = fn.lower()
+            ext = os.path.splitext(low)[1]
+            if ext not in (".dds", ".tga", ".bmp"):
+                continue
+            path = os.path.join(md, fn)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(32)
+            except OSError:
+                continue
+            if ext == ".dds" and head[:4] == b"DDS ":
+                continue
+            if ext == ".bmp" and head[:2] == b"BM":
+                continue
+            if ext == ".tga" and _is_plain_tga(head):
+                continue
+            suspects.append(path)
+    if not suspects:
+        return 0
+    tool = rfactorcrypt or steam_paths.RFACTORCRYPT
+    if not tool or not os.path.isfile(tool):
+        return 0
+    encrypted = []
+    for i in range(0, len(suspects), 200):
+        chunk = [os.path.abspath(p) for p in suspects[i:i + 200]]
+        res = subprocess.run(
+            [tool, "-i"] + chunk,
+            capture_output=True, text=True, errors="replace",
+        )
+        for line in (res.stdout or "").splitlines():
+            # Encrypted files report a known game key name (not 'None').
+            if "sign:" in line and "'None'" not in line:
+                m = re.search(r"'([^']+)'\s*$", line.strip())
+                if m and os.path.isfile(m.group(1)):
+                    encrypted.append(m.group(1))
+    if not encrypted:
+        return 0
+    for i in range(0, len(encrypted), 200):
+        chunk = [os.path.abspath(p) for p in encrypted[i:i + 200]]
+        res = subprocess.run(
+            [tool, "-d"] + chunk,
+            capture_output=True, text=True, errors="replace",
+        )
+        if res.returncode != 0:
+            details = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            raise RuntimeError(
+                "rfactorcrypt failed decrypting %d texture(s) (exit %d):\n%s"
+                % (len(chunk), res.returncode, details[-1500:])
+            )
+    return len(encrypted)
+
+
+def decrypt_sce_gmts(gmt_paths, rfactorcrypt=None):
+    """Decrypt any encrypted GSCE/SCE GMT files in-place via ``rfactorcrypt.exe -d``.
+
+    Returns the number of files decrypted. Plain rF1/GTR2 GMTs are skipped.
+    """
+    encrypted = []
+    for path in gmt_paths:
+        try:
+            with open(path, "rb") as f:
+                b = f.read()
+        except OSError:
+            continue
+        if gmt_gtr2.is_gtr2_gmt(b) or gmt_gtr2.is_rf1_gmt(b):
+            continue
+        encrypted.append(path)
+    if not encrypted:
+        return 0
+    tool = rfactorcrypt or steam_paths.RFACTORCRYPT
+    if not tool or not os.path.isfile(tool):
+        raise SystemExit(
+            "rfactorcrypt.exe not found (looked for %s), required to decrypt %d Stock Car Extreme GMT(s). "
+            "Pass --rfactorcrypt or set AC2GTR2_RFACTORCRYPT."
+            % (tool, len(encrypted))
+        )
+    chunk_size = 200
+    for i in range(0, len(encrypted), chunk_size):
+        chunk = [os.path.abspath(p) for p in encrypted[i:i + chunk_size]]
+        res = subprocess.run(
+            [tool, "-d"] + chunk,
+            capture_output=True, text=True, errors="replace",
+        )
+        if res.returncode != 0:
+            details = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            raise RuntimeError(
+                "rfactorcrypt failed decrypting %d GMT(s) (exit %d):\n%s"
+                % (len(chunk), res.returncode, details[-1500:])
+            )
+    return len(encrypted)
+
+
+def _recover_reiza_common_textures(missing_refs, maps_dir, sce_common_dirs,
+                                   preferred_mas=(), masunpack=None):
+    """Copy referenced missing textures from installed SCE/AMS ReizaCommon & commonmaps.
+
+    Only unpacks archives that contain at least one still-missing texture, and
+    only copies the exact missing files into ``maps_dir``.
+    Returns ``(recovered_lower_set, copied_count)``.
+    """
+    if not missing_refs or not sce_common_dirs:
+        return set(), 0
+    # Map lowercased filename and stem -> original requested filename(s).
+    need_exact = {t.lower(): t for t in missing_refs}
+    need_stems = {}
+    for t in missing_refs:
+        st = os.path.splitext(t.lower())[0]
+        need_stems.setdefault(st, set()).add(t.lower())
+
+    recovered = set()
+    copied = 0
+
+    def _still_needed(fname_low):
+        if fname_low in need_exact:
+            return True
+        st = os.path.splitext(fname_low)[0]
+        return st in need_stems and bool(need_stems[st])
+
+    def _mark_found(fname_low, src_path):
+        nonlocal copied
+        safe = sanitize_texture_filename(os.path.basename(src_path))
+        dst = os.path.join(maps_dir, safe)
+        if not os.path.isfile(dst):
+            shutil.copy2(src_path, dst)
+            copied += 1
+        safe_l = safe.lower()
+        recovered.add(safe_l)
+        need_exact.pop(fname_low, None)
+        need_exact.pop(safe_l, None)
+        st = os.path.splitext(safe_l)[0]
+        for matched_l in list(need_stems.get(st, ())):
+            need_exact.pop(matched_l, None)
+        need_stems.pop(st, None)
+
+    # 1. Check loose files in sce_common_dirs first.
+    mas_candidates = []
+    seen_mas = set()
+    pref_order = {m.lower(): idx for idx, m in enumerate(preferred_mas)}
+    for d in sce_common_dirs:
+        if not os.path.isdir(d):
+            continue
+        try:
+            entries = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for fn in entries:
+            fp = os.path.join(d, fn)
+            if not os.path.isfile(fp):
+                continue
+            low = fn.lower()
+            ext = os.path.splitext(low)[1]
+            if ext in TEXTURE_EXTS and _still_needed(low):
+                _mark_found(low, fp)
+            elif ext == ".mas" and not low.startswith(("sky", "clouds")):
+                key = os.path.normcase(os.path.abspath(fp))
+                if key not in seen_mas:
+                    seen_mas.add(key)
+                    pri = pref_order.get(low, 1000 if low == "commonmaps.mas" else 2000)
+                    mas_candidates.append((pri, low, fp))
+
+    if not need_exact:
+        return recovered, copied
+
+    # 2. Scan MAS archives in priority order (SCN-referenced AdPack*/commonmaps first),
+    #    unpacking only archives that match at least one still-needed texture.
+    mas_candidates.sort(key=lambda x: (x[0], x[1]))
+    with tempfile.TemporaryDirectory(prefix="ac2gtr2-sce-common-") as tmp:
+        for idx, (_pri, low_m, mp) in enumerate(mas_candidates):
+            if not need_exact:
+                break
+            entries = list_mas_entries(mp, masunpack=masunpack)
+            hits = [e for e in entries if os.path.splitext(e)[1] in TEXTURE_EXTS and _still_needed(e)]
+            if not hits:
+                continue
+            dest = os.path.join(tmp, "c%02d_%s" % (idx, os.path.splitext(low_m)[0]))
+            try:
+                unpack_mas(mp, dest, masunpack=masunpack)
+            except Exception:
+                continue
+            for fn in sorted(os.listdir(dest)):
+                fp = os.path.join(dest, fn)
+                if not os.path.isfile(fp):
+                    continue
+                fl = fn.lower()
+                if os.path.splitext(fl)[1] in TEXTURE_EXTS and _still_needed(fl):
+                    _mark_found(fl, fp)
+
+    return recovered, copied
 
 
 def unpack_mas(mas_path, out_dir, masunpack=None):
@@ -447,6 +707,8 @@ def sanitize_rf1_aiw(src_path, dst_path):
     actual_gar = min(3, max(1, (max(gar_idxs) + 1) if gar_idxs else 3))
 
     fixed_gar = False
+    fixed_grid = False
+    fixed_pits = False
 
     def _clamp_gar(m):
         nonlocal fixed_gar
@@ -456,7 +718,25 @@ def sanitize_rf1_aiw(src_path, dst_path):
             return "%s%d" % (m.group(1), actual_gar)
         return m.group(0)
 
+    def _clamp_grid(m):
+        nonlocal fixed_grid
+        old = int(m.group(2))
+        if grid_count > 0 and old > grid_count:
+            fixed_grid = True
+            return "%s%d" % (m.group(1), grid_count)
+        return m.group(0)
+
+    def _clamp_pits(m):
+        nonlocal fixed_pits
+        old = int(m.group(2))
+        if team_count > 0 and old > team_count:
+            fixed_pits = True
+            return "%s%d" % (m.group(1), team_count)
+        return m.group(0)
+
     out_text = re.sub(r"(?im)^(\s*garagespots\s*=\s*)(\d+)", _clamp_gar, text, count=1)
+    out_text = re.sub(r"(?im)^(\s*startinggrid\s*=\s*)(\d+)", _clamp_grid, out_text, count=1)
+    out_text = re.sub(r"(?im)^(\s*pitspots\s*=\s*)(\d+)", _clamp_pits, out_text, count=1)
     with open(dst_path, "w", encoding="utf-8") as f:
         f.write(out_text)
     return {
@@ -464,6 +744,8 @@ def sanitize_rf1_aiw(src_path, dst_path):
         "team_spots": team_count,
         "garage_spots": actual_gar,
         "clamped_garagespots": fixed_gar,
+        "clamped_startinggrid": fixed_grid,
+        "clamped_pitspots": fixed_pits,
     }
 
 
@@ -844,10 +1126,10 @@ def convert_scn_to_trk(scn_path, venue, layout, available_gmts, skybox_block,
             continue
         if kl == "light":
             # GTR2 drives directional sunlight from .gdb; drop directional lights
-            # and Krunch's dummy 1m NightLight00 horizon trigger.
+            # and dummy 0m/1m NightLight horizon triggers.
             if re.search(r"(?i)Type\s*=\s*Directional", blk):
                 continue
-            if name.lower() == "nightlight00" and re.search(r"Range=\(0\.0+,\s*1\.0+\)", blk):
+            if re.search(r"(?i)Range\s*=\s*\(\s*0\.0+\s*,\s*(?:0\.0+|1\.0+)\s*\)", blk):
                 continue
             kept_blocks.append(blk)
             stats["lights_kept"] += 1
@@ -885,7 +1167,7 @@ def convert_scn_to_trk(scn_path, venue, layout, available_gmts, skybox_block,
                     blk, n_rec = _SHADOW_RECEIVER_TRUE_RE.subn("ShadowReceiver=False", blk)
                     stats["stripped_receivers"] += n_rec
 
-                if mode == "off":
+                if mode == "off" or bool(re.search(r"(?i)\bMoveable\s*=\s*True\b", blk)):
                     blk, n_cast = _ANY_SHADOW_CASTER_RE.subn("", blk)
                     stats["stripped_casters"] += n_cast
                 else:
@@ -1114,7 +1396,12 @@ def _gtr2_shared_textures(gtr2_dir, masunpack):
 
 
 def _gmt_texture_refs(gmt_path):
-    """Return list of non-MATH texture filenames referenced by a GTR2 GMT v2.10."""
+    """Return list of non-MATH texture filenames referenced by a GTR2 GMT v2.10.
+
+    For animated textures (``anim_frames > 1``), expands ``name.ext`` into its
+    numbered frame filenames (``name00.ext .. name<N-1>.ext``) so missing frames
+    are recovered from shared archives or synthesized.
+    """
     with open(gmt_path, "rb") as f:
         b = f.read()
     if not gmt_gtr2.is_gtr2_gmt(b) or len(b) < gmt_gtr2.GTR2_HEADER_SIZE:
@@ -1140,10 +1427,177 @@ def _gmt_texture_refs(gmt_path):
             if pos + sz > len(b):
                 break
             tname = b[pos:pos + 64].split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+            anim_frames = struct.unpack_from("<I", b, pos + 72)[0]
             if tname and tname.upper() != "MATH":
-                refs.append(tname)
+                if anim_frames > 1:
+                    seq_len = struct.unpack_from("<I", b, pos + 76)[0]
+                    seq_max = 0
+                    if 0 < seq_len <= 100 and pos + 80 + 4 * seq_len <= len(b):
+                        seq_vals = struct.unpack_from("<%dI" % seq_len, b, pos + 80)
+                        seq_max = max(seq_vals) if seq_vals else 0
+                    n_frames = min(100, max(anim_frames, seq_max + 1))
+                    stem, ext = os.path.splitext(tname)
+                    for fi in range(n_frames):
+                        refs.append("%s%02d%s" % (stem, fi, ext))
+                else:
+                    refs.append(tname)
             pos += sz
     return refs
+
+
+def _disambiguate_rf1_materials(gmt_dirs, trk_texts):
+    """Prevent GTR2 'Material global/local mismatch' errors across scene GMTs.
+
+    In GTR2, ``Moveable=True`` instances and ``Change=False`` instances (such as
+    invisible timing/pit gates) have different material global/local semantics
+    from normal static instances. If the same material name appears across
+    incompatible instance groups (e.g. ``metalpole`` in static markers and
+    moveable balloons, or ``RDLTA`` in ``Startglow`` and ``Change=False``
+    ``xpitin``), GTR2 aborts loading with ``Material global/local mismatch``.
+    Likewise, two static GMTs defining the same material name with conflicting
+    shaders or flags are given distinct suffixed names (preserving surface
+    prefixes).
+
+    Material names are rewritten in-place in the fixed 64-byte GMT header slot.
+    Returns ``(local_group_renamed, variant_renamed)``.
+    """
+    moveable_gmts = set()
+    nochange_gmts = set()
+    static_gmts = set()
+    for text in trk_texts:
+        for kind, name, blk in _extract_top_level_blocks(text):
+            if kind.lower() != "instance" or name.lower() == "skyboxi":
+                continue
+            meshes = {m.lower() for m in re.findall(r"(?i)\bMeshFile\s*=\s*(\S+)", blk)}
+            if re.search(r"(?i)\bMoveable\s*=\s*True\b", blk):
+                moveable_gmts |= meshes
+            elif re.search(r"(?i)\bChange\s*=\s*False\b", blk):
+                nochange_gmts |= meshes
+            else:
+                static_gmts |= meshes
+
+    gmt_files = []
+    for gd in gmt_dirs:
+        if not gd or not os.path.isdir(gd):
+            continue
+        for fn in sorted(os.listdir(gd)):
+            low = fn.lower()
+            if low.endswith(".gmt") and not _is_skybox_gmt(low):
+                gmt_files.append((low, os.path.join(gd, fn)))
+
+    def _scan_mats(b):
+        if not gmt_gtr2.is_gtr2_gmt(b) or len(b) < gmt_gtr2.GTR2_HEADER_SIZE:
+            return []
+        mat_off = struct.unpack_from("<I", b, 0)[0] + 4
+        if mat_off + 4 > len(b):
+            return []
+        nmat = struct.unpack_from("<I", b, mat_off)[0]
+        pos = mat_off + 4
+        out = []
+        for _ in range(nmat):
+            need = (gmt_gtr2.GTR2_MAT_HEADER_SIZE + 3 * gmt_gtr2.GTR2_SHADER_INFO_SIZE
+                    + gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD + 4)
+            if pos + need > len(b):
+                break
+            mname = b[pos:pos + 64].split(b"\x00", 1)[0].decode("ascii", errors="replace")
+            mfl = struct.unpack_from("<I", b, pos + 64)[0]
+            shs = []
+            for lv in range(3):
+                sp = pos + gmt_gtr2.GTR2_MAT_HEADER_SIZE + lv * gmt_gtr2.GTR2_SHADER_INFO_SIZE
+                shs.append(b[sp + 8:sp + 72].split(b"\x00", 1)[0].decode("ascii", errors="replace").upper())
+            ntex_pos = pos + need - 4
+            ntex = struct.unpack_from("<I", b, ntex_pos)[0]
+            out.append((pos, mname, (mfl, shs[0], shs[1], shs[2], ntex)))
+            pos = ntex_pos + 4
+            for _ in range(ntex):
+                if pos + 80 > len(b):
+                    break
+                pos += gmt_gtr2.tex_record_size(b, pos)
+        return out
+
+    all_used_names = set()
+    static_mat_names = set()
+    static_mat_sigs = {}  # mname_low -> {sig: assigned_name}
+
+    for low, path in gmt_files:
+        try:
+            with open(path, "rb") as f:
+                b = f.read()
+        except OSError:
+            continue
+        mats = _scan_mats(b)
+        for _pos, mname, sig in mats:
+            ml = mname.lower()
+            all_used_names.add(ml)
+            if low in static_gmts:
+                static_mat_names.add(ml)
+                sigs = static_mat_sigs.setdefault(ml, {})
+                if sig not in sigs:
+                    sigs[sig] = mname
+
+    def _alloc_name(base_name, suffix):
+        cand = base_name[:max(1, 63 - len(suffix))] + suffix
+        idx = 2
+        while cand.lower() in all_used_names:
+            alt = "%s%d" % (suffix, idx)
+            cand = base_name[:max(1, 63 - len(alt))] + alt
+            idx += 1
+        all_used_names.add(cand.lower())
+        return cand
+
+    # Assign unique names to conflicting static variants (same name, different shader/flags).
+    static_variant_map = {}  # (mname_low, sig) -> new_name
+    for ml, sigs in static_mat_sigs.items():
+        if len(sigs) <= 1:
+            continue
+        for idx, (sig, orig_name) in enumerate(sigs.items()):
+            if idx == 0:
+                continue
+            static_variant_map[(ml, sig)] = _alloc_name(orig_name, "_v%d" % (idx + 1))
+
+    moveable_map = {}   # mname_low -> new_name
+    nochange_map = {}   # mname_low -> new_name
+    grp_renamed = 0
+    var_renamed = 0
+
+    for low, path in gmt_files:
+        is_mov_only = (low in moveable_gmts) and (low not in static_gmts)
+        is_nc_only = (low in nochange_gmts) and (low not in static_gmts) and (low not in moveable_gmts)
+        is_static = (low in static_gmts)
+        if not is_mov_only and not is_nc_only and not is_static:
+            continue
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        mats = _scan_mats(raw)
+        buf = None
+        for mpos, mname, sig in mats:
+            ml = mname.lower()
+            new_name = None
+            if is_mov_only and ml in static_mat_names:
+                if ml not in moveable_map:
+                    moveable_map[ml] = _alloc_name(mname, "_m")
+                new_name = moveable_map[ml]
+                grp_renamed += 1
+            elif is_nc_only and ml in static_mat_names:
+                if ml not in nochange_map:
+                    nochange_map[ml] = _alloc_name(mname, "_nc")
+                new_name = nochange_map[ml]
+                grp_renamed += 1
+            elif is_static and (ml, sig) in static_variant_map:
+                new_name = static_variant_map[(ml, sig)]
+                var_renamed += 1
+            if new_name and new_name != mname:
+                if buf is None:
+                    buf = bytearray(raw)
+                buf[mpos:mpos + 64] = gmt_gtr2._pad_ascii(new_name, 64)
+        if buf is not None:
+            with open(path, "wb") as f:
+                f.write(buf)
+
+    return grp_renamed, var_renamed
 
 
 def _make_tex_resolver(tex_files_lower, stem_to_name, renamed_maps=None):
@@ -1212,32 +1666,38 @@ def _fix_invalid_dds(map_dir, texconv, jobs=1):
 
 
 def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
-                      texconv=None, gtr2_dir=None, jobs=1,
-                      track_shadows="compact"):
-    """Convert an rFactor 1 track directory (one or all layouts) into GTR2."""
+                      rfactorcrypt=None, texconv=None, gtr2_dir=None, jobs=1,
+                      track_shadows="compact", source_type=None,
+                      sce_common_dirs=None):
+    """Convert an rFactor 1 or Stock Car Extreme track directory into GTR2."""
     track_shadows = steam_paths.validate_track_shadows(track_shadows)
     track_dir = os.path.abspath(track_dir)
     mas_tool = masunpack or steam_paths.MASUNPACK
+    crypt_tool = rfactorcrypt or steam_paths.RFACTORCRYPT
     tex_tool = texconv or steam_paths.TEXCONV
     game_dir = gtr2_dir or steam_paths.GTR2_DIR
+    src_type = source_type or detect_track_type(track_dir) or "rf1"
+    src_label = "Stock Car Extreme" if src_type == "sce" else "rFactor 1"
 
     asset_root, all_layouts = find_rf1_layouts(track_dir)
     if not all_layouts:
-        raise SystemExit("no rFactor 1 layouts (.scn + .gdb) found in %s" % track_dir)
+        raise SystemExit("no %s layouts (.scn + .gdb) found in %s" % (src_label, track_dir))
 
     if layout:
         chosen = [l for l in all_layouts if l["name"].casefold() == layout.casefold()]
         if not chosen:
             avail = ", ".join(l["name"] for l in all_layouts)
             raise SystemExit(
-                "rFactor 1 track has no layout %r (available: %s)" % (layout, avail)
+                "%s track has no layout %r (available: %s)" % (src_label, layout, avail)
             )
         selected = chosen
     else:
         selected = all_layouts
 
     venue_base = os.path.basename(os.path.normpath(asset_root))
-    work_name = "%s_%s" % (venue_base, layout) if layout else venue_base
+    raw_work = "%s_%s" % (venue_base, layout) if layout else venue_base
+    # GTR2 SearchPath / SettingsFolder tokens cannot safely contain spaces.
+    work_name = re.sub(r"\s+", "_", raw_work.strip()) or "track"
     out_dir = os.path.join(steam_paths.WORK_ROOT, work_name)
     stage = os.path.join(out_dir, "gtr2", work_name)
     if os.path.isdir(stage):
@@ -1247,11 +1707,11 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
     for d in (out_dir, stage, gmts_dir, maps_dir):
         os.makedirs(d, exist_ok=True)
 
-    print("\nconverting rFactor 1 track %s (%d layout%s: %s)"
-          % (work_name, len(selected), "" if len(selected) == 1 else "s",
+    print("\nconverting %s track %s (%d layout%s: %s)"
+          % (src_label, work_name, len(selected), "" if len(selected) == 1 else "s",
              ", ".join(l["name"] for l in selected)))
-    print("   options  track_shadows=%s (other AC-specific conversion options are ignored for rF1)"
-          % track_shadows)
+    print("   options  track_shadows=%s (other AC-specific conversion options are ignored for %s)"
+          % (track_shadows, src_label))
 
     layout_ids = assign_rf1_layout_ids(selected)
     venue_display_names = assign_rf1_display_names(selected, work_name)
@@ -1260,11 +1720,13 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
     print("\n[1/4] unpacking MAS archives and collecting assets")
     layout_mas = {}
     mas_usage = {}
+    all_scn_mas_refs = []
     for lay in selected:
         refs = parse_scn_mas_files(lay["scn"])
+        all_scn_mas_refs.extend(refs)
         resolved = []
         for mname in refs:
-            if mname.lower() in COMMON_MAS_NAMES:
+            if _is_skipped_mas(mname.lower()):
                 continue
             p = _resolve_case_insensitive((lay["dir"], asset_root), mname)
             if p:
@@ -1342,7 +1804,7 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
                 # Do not copy rF1 skybox GMTs (day.gmt, night.gmt, sunrise.gmt,
                 # sunset.gmt, horizon.gmt, sky.gmt, skyboxi.gmt); they shadow
                 # GTR2's SHARED skybox meshes and reference rF1 sky textures.
-                if low in SKYBOX_GMTS:
+                if _is_skybox_gmt(low):
                     return
                 shutil.copy2(src, os.path.join(g_dst, name))
                 g_map[low] = name
@@ -1401,7 +1863,7 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
                 low = fn.lower()
                 ext = os.path.splitext(low)[1]
                 if ext == ".gmt":
-                    if low in SKYBOX_GMTS:
+                    if _is_skybox_gmt(low):
                         continue
                     if len(selected) == 1 or low not in shared_gmts:
                         shutil.copy2(fp, os.path.join(gmts_dir, fn))
@@ -1434,13 +1896,16 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
     if renamed_maps:
         print("   sanitized spaces in %d texture filenames" % len(renamed_maps))
 
-    # 2. Validate/fix any non-DX9 DDS textures (scale=1.0, never downscale).
+    # 2. Decrypt any encrypted textures, validate/fix non-DX9 DDS textures (scale=1.0).
     print("\n[2/4] checking textures and converting GMTs to GTR2 v2.10")
     all_map_dirs = [maps_dir] + [
         os.path.join(stage, rel)
         for extras in layout_extra_paths.values()
         for rel in extras if rel.startswith("maps_")
     ]
+    n_dec_tex = decrypt_sce_textures(all_map_dirs, rfactorcrypt=crypt_tool)
+    if n_dec_tex:
+        print("   decrypted %d Stock Car Extreme texture file(s)" % n_dec_tex)
     fixed_dds = 0
     for md in all_map_dirs:
         fixed_dds += _fix_invalid_dds(md, tex_tool, jobs=jobs)
@@ -1464,60 +1929,102 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
 
     resolver = _make_tex_resolver(all_tex_lower, stem_to_name, renamed_maps=renamed_maps)
 
-    # Convert every GMT to GTR2 GMT v2.10 (preserving all geometry/faces/materials).
+    # Decrypt any encrypted Stock Car Extreme GMTs before v2.00 -> v2.10 conversion.
     all_gmt_dirs = [gmts_dir] + [
         os.path.join(stage, rel)
         for extras in layout_extra_paths.values()
         for rel in extras if rel.startswith("gmt_")
     ]
+    all_gmt_paths = [
+        os.path.join(gd, fn)
+        for gd in all_gmt_dirs
+        for fn in sorted(os.listdir(gd))
+        if fn.lower().endswith(".gmt")
+    ]
+    n_dec = decrypt_sce_gmts(all_gmt_paths, rfactorcrypt=crypt_tool)
+    if n_dec:
+        print("   decrypted %d Stock Car Extreme GMT files" % n_dec)
+        if src_type == "rf1":
+            src_type = "sce"
+
+    # Convert every GMT to GTR2 GMT v2.10 (preserving all geometry/faces/materials).
     n_conv = 0
-    for gd in all_gmt_dirs:
-        for fn in sorted(os.listdir(gd)):
-            if not fn.lower().endswith(".gmt"):
-                continue
-            path = os.path.join(gd, fn)
-            gmt_gtr2.convert_file(
-                path, remap_surfaces=True, tex_resolver=resolver,
-            )
-            with open(path, "rb") as f:
-                head = f.read(gmt_gtr2.GTR2_MAGIC_OFFSET + len(gmt_gtr2.GTR2_GMT_MAGIC))
-            if not gmt_gtr2.is_gtr2_gmt(head):
-                raise RuntimeError("GTR2 GMT v2.10 verification failed for %s" % path)
-            n_conv += 1
+    for path in all_gmt_paths:
+        gmt_gtr2.convert_file(
+            path, remap_surfaces=True, tex_resolver=resolver,
+        )
+        with open(path, "rb") as f:
+            head = f.read(gmt_gtr2.GTR2_MAGIC_OFFSET + len(gmt_gtr2.GTR2_GMT_MAGIC))
+        if not gmt_gtr2.is_gtr2_gmt(head):
+            raise RuntimeError("GTR2 GMT v2.10 verification failed for %s" % path)
+        n_conv += 1
     print("   converted %d GMT files to GTR2 v2.10" % n_conv)
 
-    # Synthesize tiny neutral fallback DDS for any missing rF1 COMMONMAPS texture
-    # not supplied by GTR2 SHARED archives (e.g. road_s_dx8.dds).
+    # Collect missing texture references across all converted GMTs.
     gtr2_shared = _gtr2_shared_textures(game_dir, mas_tool)
+
+    def _find_missing_refs():
+        missing = {}
+        for gd in all_gmt_dirs:
+            for fn in sorted(os.listdir(gd)):
+                low_g = fn.lower()
+                if not low_g.endswith(".gmt") or _is_skybox_gmt(low_g):
+                    continue
+                for tref in _gmt_texture_refs(os.path.join(gd, fn)):
+                    tl = tref.lower()
+                    if tl in all_tex_lower or tl in gtr2_shared:
+                        continue
+                    stem = os.path.splitext(tl)[0]
+                    if any(
+                        k == stem + ".dds"
+                        or (k.startswith(stem) and k.endswith((".dds", ".tga"))
+                            and k[len(stem):len(stem) + 2].isdigit())
+                        for k in all_tex_lower
+                    ):
+                        continue
+                    missing.setdefault(tl, tref)
+        return missing
+
+    missing_map = _find_missing_refs()
+    # For SCE/Reiza tracks (or any track referencing shared Reiza assets), recover
+    # referenced missing textures from installed Stock Car Extreme / Automobilista
+    # ReizaCommon and commonmaps.MAS before synthesizing fallbacks.
+    if missing_map:
+        common_dirs = (
+            list(sce_common_dirs)
+            if sce_common_dirs is not None
+            else (steam_paths.find_sce_common_dirs() if src_type == "sce" else [])
+        )
+        if common_dirs:
+            recovered, n_rec = _recover_reiza_common_textures(
+                list(missing_map.values()), maps_dir, common_dirs,
+                preferred_mas=all_scn_mas_refs, masunpack=mas_tool,
+            )
+            if n_rec:
+                all_tex_lower.update(recovered)
+                fixed_rec = _fix_invalid_dds(maps_dir, tex_tool, jobs=jobs)
+                extra = " (%d re-encoded to DX9)" % fixed_rec if fixed_rec else ""
+                print("   recovered %d shared texture(s) from ReizaCommon/commonmaps%s"
+                      % (n_rec, extra))
+                missing_map = _find_missing_refs()
+
+    # Synthesize tiny neutral fallback DDS for any remaining missing COMMONMAPS
+    # texture not supplied by GTR2 SHARED or ReizaCommon archives.
     fallback_made = []
-    for gd in all_gmt_dirs:
-        for fn in sorted(os.listdir(gd)):
-            low_g = fn.lower()
-            if not low_g.endswith(".gmt") or low_g in SKYBOX_GMTS:
-                continue
-            for tref in _gmt_texture_refs(os.path.join(gd, fn)):
-                tl = tref.lower()
-                if tl in all_tex_lower or tl in gtr2_shared:
-                    continue
-                stem = os.path.splitext(tl)[0]
-                if any(
-                    k.startswith(stem) and k.endswith((".dds", ".tga"))
-                    and k[len(stem):len(stem) + 2].isdigit()
-                    for k in all_tex_lower
-                ):
-                    continue
-                if not tl.endswith(".dds"):
-                    continue
-                # Create appropriate neutral 4x4 DXT1 placeholder in maps_dir.
-                if "_n" in tl or "bump" in tl or "norm" in tl:
-                    rgb = (128, 128, 255)
-                elif "_s" in tl or "spec" in tl:
-                    rgb = (0, 0, 0)
-                else:
-                    rgb = (128, 128, 128)
-                _write_solid_dxt1(os.path.join(maps_dir, tref), rgb)
-                all_tex_lower.add(tl)
-                fallback_made.append(tref)
+    for tl, tref in sorted(missing_map.items()):
+        out_tref = tref if tl.endswith(".dds") else (os.path.splitext(tref)[0] + ".dds")
+        out_tl = out_tref.lower()
+        if out_tl in all_tex_lower:
+            continue
+        if "_n" in tl or "_b." in tl or "bump" in tl or "norm" in tl:
+            rgb = (128, 128, 255)
+        elif "_s" in tl or "spec" in tl:
+            rgb = (0, 0, 0)
+        else:
+            rgb = (128, 128, 128)
+        _write_solid_dxt1(os.path.join(maps_dir, out_tref), rgb)
+        all_tex_lower.add(out_tl)
+        fallback_made.append(out_tref)
     if fallback_made:
         print("   synthesized %d missing COMMONMAPS fallback texture(s): %s"
               % (len(fallback_made), ", ".join(sorted(fallback_made)[:8])))
@@ -1534,6 +2041,7 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
     shared_metrics = _collect_gmt_metrics([gmts_dir])
     manifest_layouts = []
     used_venue_names = set()
+    generated_trks = []
     for lay in selected:
         lname = lay["name"]
         lay_id = layout_ids[lname]
@@ -1548,6 +2056,7 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
             track_shadows=track_shadows,
             gmt_metrics=lay_metrics,
         )
+        generated_trks.append(trk_text)
         finalize_track.write(os.path.join(stage, lay_id + ".trk"), trk_text)
 
         has_aiw = bool(lay.get("aiw") and os.path.isfile(lay["aiw"]))
@@ -1555,6 +2064,8 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
         if has_aiw:
             aiw_info = sanitize_rf1_aiw(lay["aiw"], os.path.join(stage, lay_id + ".AIW"))
         max_vehicles = aiw_info.get("grid_spots") or 36
+        if aiw_info.get("team_spots") and aiw_info.get("garage_spots"):
+            max_vehicles = min(max_vehicles, aiw_info["team_spots"] * aiw_info["garage_spots"])
 
         # Locate .tdf referenced by .gdb or layout/asset root.
         g_meta = _parse_rf1_gdb(lay["gdb"])
@@ -1614,8 +2125,13 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
             "has_cam": has_cam,
         })
 
+    n_mov_mat, n_var_mat = _disambiguate_rf1_materials(all_gmt_dirs, generated_trks)
+    if n_mov_mat or n_var_mat:
+        print("   disambiguated %d moveable + %d conflicting static GMT material name(s)"
+              % (n_mov_mat, n_var_mat))
+
     manifest = {
-        "source_type": "rf1",
+        "source_type": src_type,
         "source_dir": track_dir,
         "asset_root": asset_root,
         "venue": work_name,

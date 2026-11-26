@@ -55,7 +55,11 @@ RF2_TEXTURE_SIZE = 180
 
 MESH_FLAG_TANGENTS = 0x00000004
 MAT_FLAG_RF2_CARBODY = 0x00002000
+MAT_FLAG_UNIQUE_LOCAL = 0x00000200
+MAT_FLAG_RF1_LOCAL = 0x00040000
+MAT_FLAG_RF1_UNSUPPORTED = MAT_FLAG_RF1_LOCAL | MAT_FLAG_RF2_CARBODY | MAT_FLAG_UNIQUE_LOCAL
 TEX_FLAG_COLOR_KEY = 0x00000080
+TEX_FLAG_UNIQUE_MAT = 0x00000100
 TEX_FLAG_BINK = 0x00040000
 
 DEFAULT_NORMAL_QUANT = 500.0
@@ -1386,11 +1390,72 @@ RF1_SHADER_MAP = {
 }
 
 
+# Custom rFactor 1 / Stock Car Extreme (Reiza) shaders that require both a shader
+# name remap AND selecting/trimming/appending texture stages to match stock GTR2
+# GFX.GTR Pass-0 layouts:
+#   shader_upper -> (gtr2_shader, kept_indices_or_None, extra_math_specs)
+# where extra_math_specs is a tuple of (stage, flags, unk68) MATH records to append.
+RF1_SHADER_STAGE_MAP = {
+    # Reiza road shaders -> GTR2 L2BUMPT0XT1 (0=Diffuse, 1=Detail, 2=Bump)
+    "SIMPLEROADSHADERV2": ("L2BUMPT0XT1", (0, 1, 3), ()),
+    "SIMPLEROADSHADER": ("L2BUMPT0XT1", (0, 1, 3), ()),
+    "ADVANCEDNONLINEDROADSHADERV2": ("L2BUMPT0XT1", (0, 1, 4), ()),
+    "ADVANCEDROADSHADERV2": ("L2BUMPT0XT1", (0, 1, 4), ()),
+    "ADVANCEDROADSHADER": ("L2BUMPT0XT1", (0, 1, 4), ()),
+    # Reiza rumble strips -> GTR2 L2BUMPT0 (0=Diffuse, 1=Bump)
+    "RZRUMBLESTRIP": ("L2BUMPT0", (0, 2), ()),
+    "RUMBLESTRIPSHADER": ("L2BUMPT0", (0, 2), ()),
+    # Reiza terrain and grass shaders
+    "TERRAINV2MAPPEDVC": ("L2DIFFUSET0", (0,), ()),
+    "TERRAINV2": ("L2DIFFUSET0", (0,), ()),
+    "GRASSSHADERSHAREDDETAIL": ("L2DIFFUSET0XT1", (0, 1), ()),
+    "GRASSSHADERSIMPLE": ("L2DIFFUSET0XT1", (0, 1), ()),
+    "RZGRASSSPRITES": ("L2DIFFUSET0", (0,), ()),
+    "RZGRASSSPRITES2": ("L2DIFFUSET0", (0,), ()),
+    # Reiza tree / billboard / crowd shaders
+    "TREESHADER": ("L2DIFFUSET0", (0,), ()),
+    "TREESHADERBB": ("L2DIFFUSET0", (0,), ()),
+    "RZTREESHADERBBMULTIPLE": ("L2DIFFUSET0", (0,), ()),
+    # Reiza diffuse / bump / spec shaders
+    "DIFFUSEALPHASPEC": ("L2DIFFUSET0", (0,), ()),
+    "DIFFUSEALPHAMASK": ("L2DIFFUSET0", (0,), ()),
+    "DIFFUSEBUMPALPHASPEC": ("L2BUMPT0", (0, 1), ()),
+    "DIFFUSEAOBUMPALPHASPEC": ("L2BUMPT0XT1", (0, 1, 2), ()),
+    "DIFFUSEBUMPSPECR": ("L2BUMPSPECMAPT0", (0, 1, 2), ((3, 0x8000, 1), (4, 0x18, -1))),
+    # Reiza water shader -> GTR2 L2CMAPT0 (0=Diffuse, 1=CubeMap)
+    "RZTS_WATERADVSHADER": ("L2CMAPT0", (0, 5), ()),
+    "RZWATERSHADER": ("L2CMAPT0", (0, 5), ()),
+    # Reiza custom cubemap / blend / spec shaders
+    "L2BUMPCMAPSPECMAPADDSPECULARREFLECTT0": ("L2BUMPCMAPSPECMAPADDALPHAREFLECTT0", None, ()),
+    "L2CMAPADDT0CUSTOM": ("L2CMAPT0", (0, 1), ()),
+    "L1CMAPADDALPHAREFLECTT0T1": ("L1CMAPT0T1", (0, 1, 2), ((3, 0x8000, 1),)),
+    "L2BUMPSPECMAPT0LERPT1VERTEXALPHA": ("L2BUMPT0XT1", (0, 1, 3), ()),
+    "L1T0MULT1LERPT2T3ALPHACUSTOM": ("L1DIFFUSET0T1XT2T3", (0, 1, 2, 3), ()),
+    "L2T0MULT1LERPT2T3ALPHACUSTOM": ("L2DIFFUSET0T1XT2T3", (0, 1, 2, 3), ()),
+    "L0SPECULARMAPT0": ("L0SPECULART0", (0,), ()),
+    # SRPL sky shaders (fallback if ever present outside skyboxi)
+    "SRPLDX9SKY02": ("L2DIFFUSET0", (0,), ()),
+    "SRPLDX9SUN01": ("L2DIFFUSET0", (0,), ()),
+    "SRPLDX9CLOUDS02": ("L2DIFFUSET0", (0,), ()),
+    "SRPLDX9MOON01": ("L2DIFFUSET0", (0,), ()),
+    "SRPLDX9MOONGLOW01": ("L2DIFFUSET0", (0,), ()),
+}
+
+_BUMP_DOWNGRADE_MAP = {
+    "L2BUMPT0": ("L2DIFFUSET0", (0,)),
+    "L2BUMPT0XT1": ("L2DIFFUSET0XT1", (0, 1)),
+    "L2BUMPSPECMAPT0": ("L2DIFFUSET0", (0,)),
+    "L2BUMPSPECT0": ("L2DIFFUSET0", (0,)),
+}
+
+
 def _remap_rf1_shader_name(name):
-    """Map rF1-only shader names to stage-compatible stock GTR2 GFX.GTR shaders."""
+    """Map rF1/SCE-only shader names to stage-compatible stock GTR2 GFX.GTR shaders."""
     up = name.strip().upper()
     if not up:
         return name
+    if up in RF1_SHADER_STAGE_MAP:
+        return RF1_SHADER_STAGE_MAP[up][0]
     if up in RF1_SHADER_MAP:
         return RF1_SHADER_MAP[up]
     if up.endswith("VERTEXALPHA"):
@@ -1401,21 +1466,31 @@ def _remap_rf1_shader_name(name):
     return name
 
 
-def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_resolver=None):
-    """Validate and adapt an rF1 GMT material section for GTR2 v2.10.
+def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True,
+                           tex_resolver=None, mat_has_tangents=None):
+    """Validate and adapt an rF1/SCE GMT material section for GTR2 v2.10.
 
-    - Maps rF1-only shaders (``L2USEVERTEXONLY``, ``L*CMAPADDT0*``,
-      ``*LERPT1*VERTEXALPHA``) to stage-compatible GTR2 ``GFX.GTR`` shaders.
+    - Maps rF1/SCE-only shaders (``L2USEVERTEXONLY``, ``L*CMAPADDT0*``,
+      ``*LERPT1*VERTEXALPHA``, and Reiza GSCE custom shaders like
+      ``SIMPLEROADSHADERV2``, ``ADVANCEDNONLINEDROADSHADERV2``,
+      ``TERRAINV2MAPPEDVC``, ``TREESHADERBB``, ``RZRUMBLESTRIP``, etc.) to
+      stage-compatible GTR2 ``GFX.GTR`` shaders, rebuilding per-level texture
+      slices cleanly.
     - Appends GTR2's required ``MATH`` pseudo-texture stages on rF1 bump-spec
       shaders (``L2BUMPSPECMAPT0`` 3 -> 5 stages, ``L2BUMPSPECT0`` 2 -> 4).
     - Remaps rF1-only .tdf surface prefixes to GTR2 specialfx.tec prefixes.
     - Optionally resolves texture filenames (e.g. .tga -> .dds) via ``tex_resolver``.
+
+    Returns ``(new_mat_bytes, uv4_remap_mats)`` where ``uv4_remap_mats`` is the
+    set of material indices where a kept texture originally referenced UV channel
+    4 (requiring ``uv4 -> uv2`` copy from the rF1 secondary UV stream if present).
     """
     if len(mat_bytes) < 4:
         raise RuntimeError("truncated rF1 GMT materials in %s" % label)
     nmat = struct.unpack_from("<I", mat_bytes, 0)[0]
     pos = 4
     out = bytearray(struct.pack("<I", nmat))
+    uv4_remap_mats = set()
 
     for mi in range(nmat):
         need = (GTR2_MAT_HEADER_SIZE + 3 * GTR2_SHADER_INFO_SIZE
@@ -1424,6 +1499,9 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_reso
             raise RuntimeError("truncated rF1 GMT material %d in %s" % (mi, label))
 
         mhdr = bytearray(mat_bytes[pos:pos + GTR2_MAT_HEADER_SIZE])
+        mflags = struct.unpack_from("<I", mhdr, 64)[0]
+        if mflags & MAT_FLAG_RF1_UNSUPPORTED:
+            struct.pack_into("<I", mhdr, 64, mflags & ~MAT_FLAG_RF1_UNSUPPORTED)
         if remap_surfaces:
             mname = bytes(mhdr[:64]).split(b"\x00", 1)[0].decode("ascii", errors="replace")
             mapped = _remap_rf1_surface_name(mname)
@@ -1436,10 +1514,7 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_reso
             sb = bytearray(mat_bytes[pos:pos + GTR2_SHADER_INFO_SIZE])
             first_t, tcnt = struct.unpack_from("<2I", sb, 0)
             sh = bytes(sb[8:72]).split(b"\x00", 1)[0].decode("ascii", errors="replace")
-            mapped_sh = _remap_rf1_shader_name(sh)
-            if mapped_sh != sh:
-                sb[8:72] = _pad_ascii(mapped_sh, 64)
-            levels.append([first_t, tcnt, mapped_sh.upper(), sb])
+            levels.append([first_t, tcnt, sh.strip().upper(), sb])
             pos += GTR2_SHADER_INFO_SIZE
 
         post_pad = mat_bytes[pos:pos + GTR2_MAT_POST_SHADERS_PAD]
@@ -1455,6 +1530,9 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_reso
             if pos + sz > len(mat_bytes):
                 raise RuntimeError("truncated rF1 GMT texture %d payload in %s" % (ti, label))
             tb = bytearray(mat_bytes[pos:pos + sz])
+            tfl = struct.unpack_from("<I", tb, 64)[0]
+            if tfl & TEX_FLAG_UNIQUE_MAT:
+                struct.pack_into("<I", tb, 64, tfl & ~TEX_FLAG_UNIQUE_MAT)
             if tex_resolver is not None:
                 tname = bytes(tb[:64]).split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
                 if tname and tname.upper() != "MATH":
@@ -1464,42 +1542,85 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_reso
             tex_records.append(bytes(tb))
             pos += sz
 
-        # GTR2's L2BumpSpecMapT0 requires 5 stages ([Base, Spec, Bump, MATH, MATH])
-        # and L2BumpSpecT0 requires 4 ([Base, Bump, MATH, MATH]), while rF1 omits
-        # those two MATH pseudo-texture records. Insert them cleanly per level.
-        inserts = []  # (insert_at_old_index, [math_bytes, ...], level_idx)
-        for lv_i, (first_t, tcnt, sh_up, _sb) in enumerate(levels):
-            if sh_up == "L2BUMPSPECMAPT0" and tcnt == 3 and first_t + tcnt <= len(tex_records):
-                inserts.append((
-                    first_t + tcnt,
-                    [_make_math_tex_record(3, 0x8000, 1), _make_math_tex_record(4, 0x18, -1)],
-                    lv_i,
-                ))
-            elif sh_up == "L2BUMPSPECT0" and tcnt == 2 and first_t + tcnt <= len(tex_records):
-                inserts.append((
-                    first_t + tcnt,
-                    [_make_math_tex_record(2, 0x8000, 1), _make_math_tex_record(3, 0x18, -1)],
-                    lv_i,
-                ))
+        # Determine whether any level requires stage-slice rebuilding (Reiza custom
+        # shaders or missing MATH stages or missing tangents on bump targets).
+        has_tan = True if mat_has_tangents is None else mat_has_tangents.get(mi, True)
+        needs_rebuild = False
+        for first_t, tcnt, orig_sh, _sb in levels:
+            mapped_sh = _remap_rf1_shader_name(orig_sh).upper()
+            if orig_sh in RF1_SHADER_STAGE_MAP:
+                needs_rebuild = True
+            elif mapped_sh == "L2BUMPSPECMAPT0" and tcnt == 3:
+                needs_rebuild = True
+            elif mapped_sh == "L2BUMPSPECT0" and tcnt == 2:
+                needs_rebuild = True
+            elif not has_tan and mapped_sh in _BUMP_DOWNGRADE_MAP:
+                needs_rebuild = True
 
-        if inserts:
-            # Apply in descending index order so earlier indices stay valid.
-            for ins_at, extras, target_lv in sorted(inserts, key=lambda x: x[0], reverse=True):
-                tex_records[ins_at:ins_at] = extras
-                added = len(extras)
-                levels[target_lv][1] += added
-                for other_lv in range(3):
-                    if other_lv != target_lv and levels[other_lv][0] >= ins_at:
-                        levels[other_lv][0] += added
-            for first_t, tcnt, _sh_up, sb in levels:
-                struct.pack_into("<2I", sb, 0, first_t, tcnt)
+        if not needs_rebuild:
+            for first_t, tcnt, orig_sh, sb in levels:
+                mapped_sh = _remap_rf1_shader_name(orig_sh)
+                if mapped_sh.upper() != orig_sh:
+                    sb[8:72] = _pad_ascii(mapped_sh, 64)
+            out_texs = tex_records
+        else:
+            out_texs = []
+            for lv_i, (first_t, tcnt, orig_sh, sb) in enumerate(levels):
+                src_slice = tex_records[first_t:first_t + tcnt] if first_t + tcnt <= len(tex_records) else []
+                spec = RF1_SHADER_STAGE_MAP.get(orig_sh)
+                if spec is not None:
+                    mapped_sh, keep_idxs, extra_math = spec
+                    if keep_idxs is None:
+                        kept = list(src_slice)
+                    else:
+                        kept = [src_slice[k] for k in keep_idxs if k < len(src_slice)]
+                        if not kept and src_slice:
+                            kept = [src_slice[0]]
+                else:
+                    mapped_sh = _remap_rf1_shader_name(orig_sh).upper()
+                    kept = list(src_slice)
+                    extra_math = ()
+                    if mapped_sh == "L2BUMPSPECMAPT0" and len(kept) == 3:
+                        extra_math = ((3, 0x8000, 1), (4, 0x18, -1))
+                    elif mapped_sh == "L2BUMPSPECT0" and len(kept) == 2:
+                        extra_math = ((2, 0x8000, 1), (3, 0x18, -1))
+
+                # Downgrade bump target shaders when the mesh has no tangent stream.
+                if not has_tan and mapped_sh in _BUMP_DOWNGRADE_MAP:
+                    mapped_sh, dg_idxs = _BUMP_DOWNGRADE_MAP[mapped_sh]
+                    kept = [kept[k] for k in dg_idxs if k < len(kept)]
+                    extra_math = ()
+
+                # Clamp UV channel indices on kept static textures to GTR2's
+                # 4-channel (0..3) TEXCOORD space; track uv4 -> uv2 remapping
+                # for meshes with uv2 stream. Skip animated records (anim_frames > 1)
+                # because offset 88 falls inside their frame sequence array.
+                fixed_kept = []
+                for new_si, raw_tb in enumerate(kept):
+                    tb = bytearray(raw_tb)
+                    if len(tb) >= 92 and struct.unpack_from("<I", tb, 72)[0] <= 1:
+                        uv_ch = struct.unpack_from("<I", tb, 88)[0]
+                        if uv_ch == 4 and new_si == 2:
+                            struct.pack_into("<I", tb, 88, 2)
+                            uv4_remap_mats.add(mi)
+                        elif uv_ch >= 4:
+                            struct.pack_into("<I", tb, 88, min(new_si, 3))
+                    fixed_kept.append(bytes(tb))
+
+                for m_stage, m_flags, m_unk68 in extra_math:
+                    fixed_kept.append(_make_math_tex_record(m_stage, m_flags, m_unk68))
+
+                new_first = len(out_texs)
+                out_texs.extend(fixed_kept)
+                struct.pack_into("<2I", sb, 0, new_first, len(fixed_kept))
+                sb[8:72] = _pad_ascii(mapped_sh, 64)
 
         out.extend(mhdr)
         for _ft, _tc, _sh_up, sb in levels:
             out.extend(sb)
         out.extend(post_pad)
-        out.extend(struct.pack("<I", len(tex_records)))
-        for tb in tex_records:
+        out.extend(struct.pack("<I", len(out_texs)))
+        for tb in out_texs:
             out.extend(tb)
 
     if pos != len(mat_bytes):
@@ -1507,7 +1628,7 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_reso
             "unexpected trailing bytes (%d) after rF1 GMT materials in %s"
             % (len(mat_bytes) - pos, label)
         )
-    return bytes(out)
+    return bytes(out), uv4_remap_mats
 
 
 def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=None):
@@ -1534,12 +1655,16 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
 
     mesh_records = []
     mesh_verts = []
+    mat_has_tangents = {}
     for mi in range(nmesh):
         desc_base = moff + mi * RF1_MESH_SIZE
         u = struct.unpack_from("<10I", data, desc_base)
-        m_flags = u[0]
+        # Clear bit 0x20 (secondary UV4..7 stream) since GTR2 v2.10 only carries
+        # the primary 4-channel UV stream at +0x14.
+        m_flags = u[0] & ~0x20
         voff = u[1] + 4
         uvoff = u[3] + 4
+        uv2off = (u[4] + 4) if u[4] else 0
         tanoff = (u[5] + 4) if u[5] else 0
         vcnt = u[6]
         icnt = u[8]
@@ -1559,6 +1684,9 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
             raise RuntimeError("rF1 GMT mesh %d geometry out of bounds in %s" % (mi, label))
         verts = data[voff:v_end]
         uvs = data[uvoff:uv_end]
+        uv2s = None
+        if uv2off and uv2off + vcnt * GTR2_UV_SIZE <= mat_off:
+            uv2s = data[uv2off:uv2off + vcnt * GTR2_UV_SIZE]
         if tanoff:
             tan_end = tanoff + vcnt * GTR2_TANGENT_SIZE
             if tan_end > mat_off:
@@ -1566,17 +1694,37 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
             tans = data[tanoff:tan_end]
         else:
             tans = None
+            m_flags &= ~MESH_FLAG_TANGENTS
+        if mat_idx not in mat_has_tangents:
+            mat_has_tangents[mat_idx] = (tans is not None)
+        else:
+            mat_has_tangents[mat_idx] = mat_has_tangents[mat_idx] and (tans is not None)
         tris = data[trioff:tri_end]
         mesh_verts.append(verts)
-        mesh_records.append((m_flags, mat_idx, vcnt, icnt, verts, uvs, tans, tris))
+        mesh_records.append([m_flags, mat_idx, vcnt, icnt, verts, uvs, uv2s, tans, tris])
 
     faces_bytes, norms_bytes, out_nnorm = _rebuild_rf1_faces_and_normals(
         data, foff, nface, noff, nnorm, mesh_verts
     )
-    mat_bytes = _rewrite_rf1_materials(
+    mat_bytes, uv4_remap_mats = _rewrite_rf1_materials(
         data[mat_off:], label=label, remap_surfaces=remap_surfaces,
-        tex_resolver=tex_resolver,
+        tex_resolver=tex_resolver, mat_has_tangents=mat_has_tangents,
     )
+
+    # Copy UV channel 4 from rF1's secondary UV stream into channel 2 when a
+    # remapped Reiza shader (e.g. ADVANCEDNONLINEDROADSHADERV2) moved its bump
+    # map from uv4 -> uv2.
+    if uv4_remap_mats:
+        for rec in mesh_records:
+            if rec[1] in uv4_remap_mats and rec[6] is not None and rec[2] > 0:
+                vcnt = rec[2]
+                uv_buf = bytearray(rec[5])
+                uv2_src = rec[6]
+                for vi in range(vcnt):
+                    dst_off = vi * GTR2_UV_SIZE + 16  # channel 2 (u2, v2)
+                    src_off = vi * GTR2_UV_SIZE       # channel 4 (u4, v4)
+                    uv_buf[dst_off:dst_off + 8] = uv2_src[src_off:src_off + 8]
+                rec[5] = bytes(uv_buf)
 
     out = bytearray(GTR2_HEADER_SIZE + nmesh * GTR2_MESH_SIZE)
     face_off = len(out)
@@ -1585,7 +1733,7 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
     out.extend(norms_bytes)
 
     first_vert_off = len(out)
-    for mi, (m_flags, mat_idx, vcnt, icnt, verts, uvs, tans, tris) in enumerate(mesh_records):
+    for mi, (m_flags, mat_idx, vcnt, icnt, verts, uvs, _uv2s, tans, tris) in enumerate(mesh_records):
         v_pos = len(out)
         if mi == 0:
             first_vert_off = v_pos

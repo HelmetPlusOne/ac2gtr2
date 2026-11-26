@@ -254,7 +254,11 @@ def main():
     ap.add_argument("--texconv", default=None,
                     help="path to texconv.exe (defaults to bundled copy or rFactor 2)")
     ap.add_argument("--masunpack", default=None,
-                    help="path to masunpack.exe for rFactor 1 .mas archives")
+                    help="path to masunpack.exe for rFactor 1 / Stock Car Extreme .mas archives")
+    ap.add_argument("--rfactorcrypt", default=None,
+                    help="path to rfactorcrypt.exe for Stock Car Extreme encrypted .gmt files")
+    ap.add_argument("--sce", default=None,
+                    help="Stock Car Extreme or Automobilista folder for ReizaCommon shared textures")
     args = ap.parse_args()
 
     if args.gtr2:
@@ -265,6 +269,10 @@ def main():
         os.environ["AC2GTR2_TEXCONV"] = os.path.abspath(args.texconv)
     if args.masunpack:
         os.environ["AC2GTR2_MASUNPACK"] = os.path.abspath(args.masunpack)
+    if args.rfactorcrypt:
+        os.environ["AC2GTR2_RFACTORCRYPT"] = os.path.abspath(args.rfactorcrypt)
+    if args.sce:
+        os.environ["AC2GTR2_SCE_DIR"] = os.path.abspath(args.sce)
     if args.blender:
         os.environ["AC2GTR2_BLENDER"] = os.path.abspath(args.blender)
 
@@ -287,7 +295,7 @@ def main():
         args.install = os.path.abspath(args.install)
 
     track_type = rf1_track.detect_track_type(args.track_dir)
-    if track_type == "rf1":
+    if track_type in ("rf1", "sce"):
         try:
             config = steam_paths.load_config()
         except ValueError as exc:
@@ -303,17 +311,19 @@ def main():
         if not check_setup.check(args.track_dir, args.layout, None,
                                  args.install, need_blender=False,
                                  track_shadows=args.track_shadows,
-                                 track_type="rf1"):
+                                 track_type=track_type):
             raise SystemExit(1)
         rf1_track.convert_rf1_track(
             args.track_dir,
             layout=args.layout,
             install=args.install,
             masunpack=steam_paths.MASUNPACK,
+            rfactorcrypt=steam_paths.RFACTORCRYPT,
             texconv=steam_paths.TEXCONV,
             gtr2_dir=steam_paths.GTR2_DIR,
             jobs=args.jobs,
             track_shadows=args.track_shadows,
+            source_type=track_type,
         )
         return
 

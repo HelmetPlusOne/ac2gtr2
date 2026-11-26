@@ -131,36 +131,56 @@ Measured across stock GTR2 tracks (`Monza`, `Barcelona`, `Spa`, `Bahrain`,
      mipmaps (preserving DXT3/DXT5 alpha blocks, DXT1 opaque vs 1-bit alpha
      semantics, and excluding bump/specular/helper textures).
 
-## rFactor 1 input tracks (`rf1_track.py`, `gmt_gtr2.py`)
+## rFactor 1 and Stock Car Extreme input tracks (`rf1_track.py`, `gmt_gtr2.py`)
 
-- Input type (`ac` vs `rf1`) is auto-detected by `rf1_track.detect_track_type`
-  (and inside `.zip` archives by `track_zip.track_folders`).
+- Input type (`ac` vs `rf1` vs `sce`) is auto-detected by
+  `rf1_track.detect_track_type` (and inside `.zip` archives by
+  `track_zip.track_folders`). Stock Car Extreme (GSCE/SCE) tracks are detected
+  via Reiza `.scn`/`.gdb` markers (`ReizaCommon`, `AdPack*.MAS`,
+  `CloudsLight.MAS`, `SkyTropical*.MAS`, `StockV8`/`StockCar`/`GSCE`).
 - `[track] track_shadows` (`compact` / `off` / `full`, overridable via
-  `--track-shadows`) applies to rFactor 1 `.scn` -> `.trk` conversion (with
-  `Dynamic, Texture` casters always stripped; `compact` caps `MaxShadowRange`
-  to `200 m`, keeps `ShadowReceiver=True` only on rendered `HATTarget=True`
-  surfaces, strips `Texture` casters, and keeps compact `Static, Solid` casters
-  up to `60 m` / `8000` tris at `32`/`64`; `off` strips all track casters while
-  preserving car shadows on `HATTarget=True` surfaces). All other AC-only
-  conversion options (`texture_scale`, `road_smoothness`, `mesh_coarsening`,
-  `strip_unused_gmt_data`, `track_brightness`) are ignored for rFactor 1 inputs.
-- rFactor 1 `.mas` archives are unpacked using `masunpack.exe`
-  (`D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\masunpack.exe`,
-  configurable via `--masunpack` / `AC2GTR2_MASUNPACK`).
-- rFactor 1 GMT v2.00 binaries share GTR2 v2.10's vertex/UV/tangent/triangle
-  and 3-level material/animated/BIK texture formats, differing in the header
-  (no 16-byte magic at `0x08`, `counts` at `0x174`), 132-byte mesh descriptors
-  (vs 108-byte), and 32-byte `FaceData` without `plane_d` (vs 36-byte).
+  `--track-shadows`) applies to rFactor 1 and Stock Car Extreme `.scn` -> `.trk`
+  conversion (with `Dynamic, Texture` casters always stripped; `compact` caps
+  `MaxShadowRange` to `200 m`, keeps `ShadowReceiver=True` only on rendered
+  `HATTarget=True` surfaces, strips `Texture` casters, and keeps compact
+  `Static, Solid` casters up to `60 m` / `8000` tris at `32`/`64`; `off` strips
+  all track casters while preserving car shadows on `HATTarget=True` surfaces).
+  All other AC-only conversion options (`texture_scale`, `road_smoothness`,
+  `mesh_coarsening`, `strip_unused_gmt_data`, `track_brightness`) are ignored.
+- `.mas` archives are unpacked using `masunpack.exe` and encrypted Stock Car
+  Extreme GMTs and textures (e.g. `SKIDHARD.TGA`, `sign:4b1dca9f960524e8`,
+  `'Game Stock Car'`) are decrypted in batches via `rfactorcrypt.exe -d` (both
+  auto-detected from `D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\`,
+  configurable via `--masunpack` / `--rfactorcrypt`).
 - `gmt_gtr2.convert_rf1_to_gtr2()` converts v2.00 → v2.10 cleanly (reading
-  each rF1 mesh's material index from offset `+0x38` of the 132-byte mesh
-  descriptor), maps rF1-only shaders missing from GTR2's `GFX.GTR`
-  (`L2USEVERTEXONLY` → `L2USEVERTEXPIXEL`, `L0/L1/L2CMAPADDT0*` →
-  `L0/L1/L2CMAPT0*`, `*LERPT1*VERTEXALPHA` → stage-compatible `L*DIFFUSET0*`
-  shaders), appends the two GTR2 `MATH` pseudo-texture stages required by
-  `L2BUMPSPECMAPT0` (3 → 5) and `L2BUMPSPECT0` (2 → 4), remaps rF1-only `.tdf`
-  surface prefixes (`rdax`/`rdta`/`rdcp`/`rged`/`stick`, `grxs`, `dstg`/`gtrp`,
-  `twal`, `cem`/`wall`/`safer`) to GTR2 `specialfx.tec` prefixes, and resolves
-  stem mismatches (`.tga`/`.bmp` → `.dds`).
+  each mesh's material index from offset `+0x38` of the 132-byte mesh
+  descriptor, clearing the secondary `UV4..7` flag `0x20` while migrating bump
+  `uv4 -> uv2`, and clearing unsupported GSCE/rF1 local material/texture flag
+  bits `0x00040000`/`0x00000200`/`0x00000100` that trigger GTR2
+  `Material global/local mismatch`), maps rF1 and Reiza/GSCE custom shaders
+  missing from GTR2's `GFX.GTR` (`L2USEVERTEXONLY`, `L*CMAPADDT0*`,
+  `*LERPT1*VERTEXALPHA`, `SIMPLEROADSHADERV2`, `ADVANCEDNONLINEDROADSHADERV2`,
+  `RZRUMBLESTRIP`, `TERRAINV2MAPPEDVC`, `GRASSSHADER*`, `RZGRASSSPRITES*`,
+  `TREESHADER*`, `RZTREESHADERBBMULTIPLE`, `DIFFUSE*ALPHASPEC`,
+  `DIFFUSEBUMPSPECR`, `RZTS_WATERADVSHADER`,
+  `L2BUMPCMAPSPECMAPADDSPECULARREFLECTT0`, `L2CMAPADDT0CUSTOM`, etc.) to
+  stage-compatible stock GTR2 shaders with clean per-level texture slicing,
+  downgrades bump targets to diffuse if a mesh has no tangent stream, appends
+  the two GTR2 `MATH` pseudo-texture stages required by `L2BUMPSPECMAPT0`
+  (3 → 5) and `L2BUMPSPECT0` (2 → 4), remaps rF1-only `.tdf` surface prefixes
+  to GTR2 `specialfx.tec` prefixes, and resolves stem mismatches.
+- `_disambiguate_rf1_materials()` renames materials colliding across
+  `Moveable=True`, `Change=False`, and conflicting static shader/stage
+  definitions (`(mat_flags, L0, L1, L2, ntex)`), and `sanitize_rf1_aiw()`
+  clamps `startinggrid`, `pitspots`, and `garagespots` to actual `[GRID]` and
+  `[PITS]` counts.
+- Shared Reiza textures referenced by SCE tracks are recovered automatically
+  from installed Stock Car Extreme / Automobilista `ReizaCommon` and
+  `commonmaps.MAS` archives (only copying textures actually referenced by the
+  track), with neutral 4×4 DXT1 placeholders synthesized for any remaining
+  missing common textures. Venue folder names with spaces (e.g.
+  `Jerez de la Frontera`) are sanitized to underscores (`Jerez_de_la_Frontera`)
+  for GTR2 `SearchPath=` / `SettingsFolder=` compatibility.
 - Multi-layout rF1 venues (e.g. `Mainz-Finthen` with `MFinthen_DTM` and
   `MFinthen_DTMwet`) convert all layouts into one GTR2 location when `--layout`
   is omitted, isolating colliding per-layout overrides into `gmt_<layout>/` and

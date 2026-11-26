@@ -628,6 +628,16 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             self.assertEqual(os.path.normcase(root), os.path.normcase(rf1_dir))
             self.assertEqual([l["name"] for l in lays], ["LayoutA"])
 
+            # Stock Car Extreme detection via ReizaCommon / AdPack / StockV8 markers.
+            sce_dir = os.path.join(tmp, "sce_venue")
+            sce_lay = os.path.join(sce_dir, "CMP")
+            os.makedirs(sce_lay)
+            with open(os.path.join(sce_lay, "CMP.scn"), "w", encoding="utf-8") as f:
+                f.write("CUBEASF\nSearchPath=ReizaCommon\nMASFile=AdPackStockcar.MAS\n")
+            with open(os.path.join(sce_lay, "CMP.gdb"), "w", encoding="utf-8") as f:
+                f.write("CMP\n{\n  Filter Properties = StockV8 *\n}\n")
+            self.assertEqual(rf1_track.detect_track_type(sce_dir), "sce")
+
         # track_zip detects rF1 zip folders when no .kn5 exists.
         names = [
             "Miami22/miami22.mas",
@@ -661,7 +671,9 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         )
         uvoff = voff + len(verts)
         uvs = struct.pack("<8f", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) * 3
-        trioff = uvoff + len(uvs)
+        tanoff = uvoff + len(uvs)
+        tans = struct.pack("<6f", 1.0, 0.0, 0.0, 0.0, 0.0, 1.0) * 3
+        trioff = tanoff + len(tans)
         tris = struct.pack("<3H", 0, 1, 2)
         mat_off = trioff + len(tris)
 
@@ -673,7 +685,7 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         struct.pack_into("<I", mesh_desc0, 0x4C, 0xFFFFFFFF)
         struct.pack_into(
             "<10I", mesh_desc1, 0,
-            0x20004011, voff - 4, 0, uvoff - 4, 0, 0, 3, 0, 3, trioff - 4,
+            0x20004015, voff - 4, 0, uvoff - 4, 0, tanoff - 4, 3, 0, 3, trioff - 4,
         )
         struct.pack_into("<I", mesh_desc1, 0x38, 1)
         struct.pack_into("<I", mesh_desc1, 0x4C, 0xFFFFFFFF)
@@ -707,9 +719,10 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         struct.pack_into("<3I", tb2, 80, 0, 1, 2)
         mat.extend(tb2)
 
-        # Material 1: L2BUMPSPECMAPT0 with 3 rF1 textures (must expand to 5 with 2 MATH).
+        # Material 1: L2BUMPSPECMAPT0 with 3 rF1 textures (must expand to 5 with 2 MATH)
+        # and GSCE/rF1 local/unique material/texture flags that must be stripped for GTR2.
         mat.extend(gmt_gtr2._pad_ascii("road_bump", 64))
-        mat.extend(struct.pack("<I", 0x68900003))
+        mat.extend(struct.pack("<I", 0x68940203))
         mat.extend(struct.pack("<16f", *([1.0, 1.0, 1.0, 1.0] * 3 + [0.0, 0.0, 0.0, 1.0])))
         mat.extend(struct.pack("<2If", 2, 1, 1.0))
         for first_t, tc, sname in ((0, 1, "L0DIFFUSET0"), (1, 1, "L1DIFFUSET0"), (2, 3, "L2BUMPSPECMAPT0")):
@@ -722,10 +735,10 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         for tname in ("road.tga", "road.tga", "road.tga", "road_s.dds", "road_b.dds"):
             tb = bytearray(gmt_gtr2.GTR2_TEXTURE_SIZE)
             tb[:64] = gmt_gtr2._pad_ascii(tname, 64)
-            struct.pack_into("<IiII", tb, 64, 0x18, -1, 1, 1)
+            struct.pack_into("<IiII", tb, 64, 0x118, -1, 1, 1)
             mat.extend(tb)
 
-        rf1_raw = bytes(hdr + mesh_desc0 + mesh_desc1 + face + norm + verts + uvs + tris + mat)
+        rf1_raw = bytes(hdr + mesh_desc0 + mesh_desc1 + face + norm + verts + uvs + tans + tris + mat)
         self.assertTrue(gmt_gtr2.is_rf1_gmt(rf1_raw))
         gtr2_raw = gmt_gtr2.convert_rf1_to_gtr2(
             rf1_raw,
@@ -740,6 +753,13 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         self.assertIn(b"flag.dds", info["textures"])
         self.assertEqual(gtr2_raw.count(b"MATH\x00"), 2)
         self.assertIn(b"road_rdax_main", gtr2_raw)
+        # Verify unsupported GSCE/rF1 local material/texture flags were cleared.
+        m1_off = gtr2_raw.index(b"road_bump\x00")
+        self.assertEqual(struct.unpack_from("<I", gtr2_raw, m1_off + 64)[0], 0x68900003)
+        m1_t0 = (m1_off + gmt_gtr2.GTR2_MAT_HEADER_SIZE
+                 + 3 * gmt_gtr2.GTR2_SHADER_INFO_SIZE
+                 + gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD + 4)
+        self.assertEqual(struct.unpack_from("<I", gtr2_raw, m1_t0 + 64)[0], 0x18)
         # Verify mesh 0 -> mat 0 and mesh 1 -> mat 1 in GTR2 108-byte mesh descriptors.
         out_moff = struct.unpack_from("<I", gtr2_raw, 0x170)[0] + 4
         self.assertEqual(struct.unpack_from("<I", gtr2_raw, out_moff + 4)[0], 0)
@@ -759,6 +779,17 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             "L2DIFFUSET0T1XT2T3",
         )
         self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2DIFFUSET0"), "L2DIFFUSET0")
+        # Stock Car Extreme / Reiza custom shaders map to stock GTR2 GFX.GTR shaders.
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("SIMPLEROADSHADERV2"), "L2BUMPT0XT1")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("ADVANCEDNONLINEDROADSHADERV2"), "L2BUMPT0XT1")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("TREESHADERBB"), "L2DIFFUSET0")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("TERRAINV2MAPPEDVC"), "L2DIFFUSET0")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("RZRUMBLESTRIP"), "L2BUMPT0")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("DIFFUSEBUMPSPECR"), "L2BUMPSPECMAPT0")
+        self.assertEqual(
+            gmt_gtr2._remap_rf1_shader_name("L2BUMPCMAPSPECMAPADDSPECULARREFLECTT0"),
+            "L2BUMPCMAPSPECMAPADDALPHAREFLECTT0",
+        )
 
         # Test .scn -> .trk and .gdb conversion across track_shadows modes.
         with tempfile.TemporaryDirectory() as tmp:
@@ -922,10 +953,44 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
                 )
             aiw_stats = rf1_track.sanitize_rf1_aiw(aiw_in, aiw_out)
             self.assertTrue(aiw_stats["clamped_garagespots"])
+            self.assertTrue(aiw_stats["clamped_startinggrid"])
+            self.assertTrue(aiw_stats["clamped_pitspots"])
             self.assertEqual(aiw_stats["garage_spots"], 3)
             self.assertEqual(aiw_stats["grid_spots"], 2)
+            self.assertEqual(aiw_stats["team_spots"], 1)
             with open(aiw_out, encoding="utf-8") as f:
-                self.assertIn("garagespots=3", f.read())
+                aiw_txt = f.read()
+                self.assertIn("garagespots=3", aiw_txt)
+                self.assertIn("startinggrid=2", aiw_txt)
+                self.assertIn("pitspots=1", aiw_txt)
+            # Plain TGA header detection rejects encrypted GSCE TGA bytes.
+            self.assertTrue(rf1_track._is_plain_tga(bytes([0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0, 64, 0, 32, 0])))
+            self.assertFalse(rf1_track._is_plain_tga(bytes.fromhex("e83aab945f46b13e001eae02c08cac757575")))
+
+            # Moveable=True and Change=False vs static material global/local disambiguation.
+            dis_dir = os.path.join(tmp, "dis_gmt")
+            os.makedirs(dis_dir)
+            with open(os.path.join(dis_dir, "static_pole.gmt"), "wb") as f:
+                f.write(gtr2_raw)
+            with open(os.path.join(dis_dir, "balloon.gmt"), "wb") as f:
+                f.write(gtr2_raw)
+            with open(os.path.join(dis_dir, "xpitin.gmt"), "wb") as f:
+                f.write(gtr2_raw)
+            fake_trk = (
+                "Instance=pole01\n{\n  MeshFile=static_pole.gmt CollTarget=True HATTarget=False\n}\n"
+                "Instance=balloon01\n{\n  Moveable=True\n  MeshFile=balloon.gmt CollTarget=False HATTarget=False\n}\n"
+                "Instance=xpitin\n{\n  Render=False Change=False\n  MeshFile=xpitin.gmt CollTarget=True HATTarget=False\n}\n"
+            )
+            n_mov, n_var = rf1_track._disambiguate_rf1_materials([dis_dir], [fake_trk])
+            self.assertEqual(n_mov, 4)
+            self.assertEqual(n_var, 0)
+            with open(os.path.join(dis_dir, "balloon.gmt"), "rb") as f:
+                b_raw = f.read()
+            self.assertIn(b"road_rdax_main_m\x00", b_raw)
+            self.assertIn(b"road_bump_m\x00", b_raw)
+            with open(os.path.join(dis_dir, "xpitin.gmt"), "rb") as f:
+                x_raw = f.read()
+            self.assertIn(b"road_rdax_main_nc\x00", x_raw)
 
 
 if __name__ == "__main__":

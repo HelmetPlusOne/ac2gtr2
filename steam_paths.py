@@ -36,6 +36,9 @@ DEFAULT_GTR2_CANDIDATES = (
 DEFAULT_MASUNPACK_CANDIDATES = (
     r"D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\masunpack.exe",
 )
+DEFAULT_RFACTORCRYPT_CANDIDATES = (
+    r"D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\rfactorcrypt.exe",
+)
 INI_NAME = "ac2gtr2.ini"
 DEFAULT_TEXTURE_SCALE = 0.5
 DEFAULT_TEXTURE_SCALE_MIN_SIZE = 1024
@@ -181,6 +184,7 @@ BUNDLED_BLENDER = os.path.join(APP_DIR, "tools", "blender", "blender.exe")
 BUNDLED_BLENDER_STAGE = os.path.join(APP_DIR, "tools", "blender_scripts", "blender_stage.py")
 BUNDLED_TEXCONV = os.path.join(APP_DIR, "tools", "texconv", "texconv.exe")
 BUNDLED_MASUNPACK = os.path.join(APP_DIR, "tools", "rfactortools", "masunpack.exe")
+BUNDLED_RFACTORCRYPT = os.path.join(APP_DIR, "tools", "rfactortools", "rfactorcrypt.exe")
 BUNDLED_AC_DIR = os.path.join(APP_DIR, "data", "ac")
 BUNDLED_GTR2_DIR = os.path.join(APP_DIR, "data", "gtr2")
 
@@ -196,6 +200,55 @@ def find_masunpack():
     if found:
         return found
     return DEFAULT_MASUNPACK_CANDIDATES[0]
+
+
+def find_rfactorcrypt(masunpack_path=None):
+    """Locate rfactorcrypt.exe (bundled, alongside masunpack.exe, Tools folder, or PATH)."""
+    if os.path.isfile(BUNDLED_RFACTORCRYPT):
+        return BUNDLED_RFACTORCRYPT
+    if masunpack_path:
+        sibling = os.path.join(os.path.dirname(os.path.abspath(masunpack_path)), "rfactorcrypt.exe")
+        if os.path.isfile(sibling):
+            return sibling
+    for cand in DEFAULT_RFACTORCRYPT_CANDIDATES:
+        if os.path.isfile(cand):
+            return cand
+    found = shutil.which("rfactorcrypt")
+    if found:
+        return found
+    return DEFAULT_RFACTORCRYPT_CANDIDATES[0]
+
+
+def find_sce_common_dirs():
+    """Return existing Reiza shared asset directories (ReizaCommon / Locations) if installed.
+
+    Searches ``AC2GTR2_SCE_DIR`` first, then Steam installations of Stock Car
+    Extreme and Automobilista (which share ``ReizaCommon`` and ``commonmaps.MAS``).
+    """
+    roots = []
+    env_dir = os.environ.get("AC2GTR2_SCE_DIR")
+    if env_dir:
+        roots.append(os.path.abspath(env_dir))
+    for folder in ("Stock Car Extreme", "Game Stock Car Extreme", "GSC2013", "Automobilista"):
+        for lib in libraries():
+            p = os.path.join(lib, "steamapps", "common", folder)
+            if os.path.isdir(p):
+                roots.append(p)
+    found = []
+    seen = set()
+    for r in roots:
+        for cand in (
+            os.path.join(r, "GameData", "Locations", "ReizaCommon"),
+            os.path.join(r, "GameData", "Locations"),
+            os.path.join(r, "ReizaCommon"),
+            r,
+        ):
+            if os.path.isdir(cand):
+                key = os.path.normcase(os.path.abspath(cand))
+                if key not in seen:
+                    seen.add(key)
+                    found.append(os.path.abspath(cand))
+    return found
 
 IS_STANDALONE = bool(
     getattr(sys, "frozen", False)
@@ -224,6 +277,7 @@ TEXCONV = (
         else os.path.join(RF2_DIR, "Support", "Tools", "MapConverter", "texconv.exe"))
 )
 MASUNPACK = os.environ.get("AC2GTR2_MASUNPACK") or find_masunpack()
+RFACTORCRYPT = os.environ.get("AC2GTR2_RFACTORCRYPT") or find_rfactorcrypt(MASUNPACK)
 BLENDER = (
     os.environ.get("AC2GTR2_BLENDER")
     or (BUNDLED_BLENDER if os.path.isfile(BUNDLED_BLENDER) else DEFAULT_BLENDER)

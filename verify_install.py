@@ -238,6 +238,7 @@ def verify_rf1_install(installed, out_dir):
     #    no rF1 skybox GMTs shadow GTR2 SHARED, and every texture (including
     #    skyboxi.gmt's _invisible.dds) is installed.
     bad_gmt = []
+    bad_mat_flags = []
     shadowed_sky = []
     missing_tex = set()
     total_gmts = 0
@@ -252,29 +253,54 @@ def verify_rf1_install(installed, out_dir):
             if g2 is None or g2["trailing"] != 0:
                 bad_gmt.append(os.path.basename(path))
                 continue
-            for t in g2["textures"]:
-                tname = t.decode("ascii", errors="replace").strip()
+            mat_off = struct.unpack_from("<I", b, 0)[0] + 4
+            nmat = struct.unpack_from("<I", b, mat_off)[0]
+            mpos = mat_off + 4
+            mhdr_sz = (gmt_gtr2.GTR2_MAT_HEADER_SIZE
+                       + 3 * gmt_gtr2.GTR2_SHADER_INFO_SIZE
+                       + gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD)
+            for _ in range(nmat):
+                if mpos + mhdr_sz + 4 > len(b):
+                    break
+                mfl = struct.unpack_from("<I", b, mpos + 64)[0]
+                if mfl & gmt_gtr2.MAT_FLAG_RF1_UNSUPPORTED:
+                    bad_mat_flags.append((os.path.basename(path), hex(mfl)))
+                nt = struct.unpack_from("<I", b, mpos + mhdr_sz)[0]
+                mpos += mhdr_sz + 4
+                for _ in range(nt):
+                    mpos += gmt_gtr2.tex_record_size(b, mpos)
+            for tname in rf1_track._gmt_texture_refs(path):
                 tl = tname.lower()
                 if not tl or tl in on_disk_lower:
                     continue
                 stem = os.path.splitext(tl)[0]
                 if not any(
-                    k == stem + ".dds" or k.startswith(stem) and k.endswith((".dds", ".tga"))
+                    k == stem + ".dds" or k == stem + ".tga"
                     for k in on_disk_lower
                 ):
                     missing_tex.add(tname)
 
     if bad_gmt:
         problems.append("installed GMTs not valid GTR2 GMT v2.10: %s" % bad_gmt[:5])
+    if bad_mat_flags:
+        problems.append("installed GMTs carry unsupported GTR2 mat_flags: %s" % bad_mat_flags[:5])
     if shadowed_sky:
         problems.append("rF1 skybox GMTs shadow GTR2 SHARED skybox: %s" % shadowed_sky[:5])
     if missing_tex:
         problems.append("textures referenced but not installed: %s" % sorted(missing_tex)[:5])
 
-    # 2. Verify every installed DDS is valid DX9 pow2 DXT1/3/5 with exact byte size.
+    # 2. Verify every installed DDS is valid DX9 pow2 DXT1/3/5 with exact byte size,
+    #    and every installed TGA has an unencrypted valid TGA header.
     unloadable = []
     total_dds = 0
     for low, paths in sorted(map_paths.items()):
+        if low.endswith(".tga"):
+            for inst_tga in paths:
+                with open(inst_tga, "rb") as fh:
+                    head = fh.read(18)
+                if not rf1_track._is_plain_tga(head):
+                    unloadable.append(os.path.basename(inst_tga) + " (corrupt or encrypted TGA)")
+            continue
         if not low.endswith(".dds"):
             continue
         for inst_dds in paths:
@@ -337,6 +363,48 @@ def verify_rf1_install(installed, out_dir):
         trk_path = base + ".trk"
         if os.path.isfile(trk_path):
             scene = open(trk_path, encoding="utf-8", errors="replace").read()
+            mov_gmts = set()
+            nc_gmts = set()
+            stat_gmts = set()
+            for kind, iname, blk in rf1_track._extract_top_level_blocks(scene):
+                if kind.lower() != "instance" or iname.lower() == "skyboxi":
+                    continue
+                ms = {m.lower() for m in re.findall(r"(?i)\bMeshFile\s*=\s*(\S+)", blk)}
+                if re.search(r"(?i)\bMoveable\s*=\s*True\b", blk):
+                    mov_gmts |= ms
+                elif re.search(r"(?i)\bChange\s*=\s*False\b", blk):
+                    nc_gmts |= ms
+                else:
+                    stat_gmts |= ms
+            if stat_gmts and (mov_gmts or nc_gmts):
+                def _mat_names_for(gset):
+                    out_m = set()
+                    for gl in gset:
+                        for gp in gmt_paths.get(gl, ()):
+                            with open(gp, "rb") as fh:
+                                gb = fh.read()
+                            if not gmt_gtr2.is_gtr2_gmt(gb):
+                                continue
+                            mo = struct.unpack_from("<I", gb, 0)[0] + 4
+                            nm = struct.unpack_from("<I", gb, mo)[0]
+                            p = mo + 4
+                            for _ in range(nm):
+                                mn = gb[p:p + 64].split(b"\x00", 1)[0].decode("ascii", errors="replace").lower()
+                                if mn:
+                                    out_m.add(mn)
+                                p += gmt_gtr2.GTR2_MAT_HEADER_SIZE + 3 * gmt_gtr2.GTR2_SHADER_INFO_SIZE + gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD
+                                nt = struct.unpack_from("<I", gb, p)[0]
+                                p += 4
+                                for _ in range(nt):
+                                    p += gmt_gtr2.tex_record_size(gb, p)
+                    return out_m
+                stat_mats = _mat_names_for(stat_gmts)
+                m_overlap = sorted((_mat_names_for(mov_gmts) | _mat_names_for(nc_gmts)) & stat_mats)
+                if m_overlap:
+                    problems.append(
+                        "%s has material global/local mismatch (Moveable/Change=False vs static): %s"
+                        % (stem + ".trk", m_overlap[:5])
+                    )
             for mf in re.findall(r"(?i)\bMeshFile\s*=\s*(\S+)", scene):
                 if mf.lower() not in avail_gmts:
                     missing_meshes.add(mf)
@@ -374,7 +442,15 @@ def verify_rf1_install(installed, out_dir):
         problems.append("TRK Instance= names exceed gMotor 31-char limit: %d, e.g. %s"
                         % (len(overlong_instances), overlong_instances[:4]))
 
-    print("installed:   %s (rFactor 1 source)" % installed)
+    src_label = "rFactor 1"
+    mf_path = os.path.join(out_dir, "rf1_manifest.json")
+    if os.path.isfile(mf_path):
+        try:
+            if json.load(open(mf_path, encoding="utf-8")).get("source_type") == "sce":
+                src_label = "Stock Car Extreme"
+        except Exception:
+            pass
+    print("installed:   %s (%s source)" % (installed, src_label))
     print("layouts:     %d (%s)" % (len(gdbs), ", ".join(os.path.splitext(g)[0] for g in gdbs)))
     print("gmts:        %d GTR2 v2.10 verified (%d bad)" % (total_gmts - len(bad_gmt), len(bad_gmt)))
     print("textures:    %d media (%d DX9 DDS verified), %d missing"
