@@ -285,6 +285,17 @@ class Gtr2GmtTests(unittest.TestCase):
         self.assertEqual((nface_b, nnorm_b), (0, 0))
         self.assertEqual(verify_install._gtr2_gmt_info(fast_b)["trailing"], 0)
 
+        # Case C: corrupted long needle sliver (>50m span, <10m altitude) is dropped
+        # even when max_face_span=None (e.g. on 1ROAD_* / 1KERB_* meshes).
+        sliver = bytearray(_make_rf2_gmt("1ROAD_sliver"))
+        for vi, (x, y, z) in enumerate(((0.0, 1.0, 0.0), (200.0, 1.0, 200.0), (200.1, 1.0, 200.0))):
+            struct.pack_into("<3f", sliver, voff + vi * gmt_gtr2.RF2_VERTEX_SIZE, x, y, z)
+        fast_s = gmt_gtr2.convert_rf2_to_gtr2(bytes(sliver), max_face_span=None)
+        with mock.patch.object(gmt_gtr2, "_np", None):
+            pure_s = gmt_gtr2.convert_rf2_to_gtr2(bytes(sliver), max_face_span=None)
+        self.assertEqual(fast_s, pure_s)
+        self.assertEqual(struct.unpack_from("<I", fast_s, 0x174)[0], 0)
+
 
 class Gtr2FinalizeTests(unittest.TestCase):
     def test_long_layout_identifier_and_instance_identifier_limits(self):
@@ -430,6 +441,11 @@ class Gtr2FinalizeTests(unittest.TestCase):
         def _rf2_with_tri(name, pts):
             buf = bytearray(_make_rf2_gmt(name))
             voff = struct.unpack_from("<I", buf, 0x140)[0] + 4
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            zs = [p[2] for p in pts]
+            struct.pack_into("<3f", buf, 0x0C8, min(xs), min(ys), min(zs))
+            struct.pack_into("<3f", buf, 0x0D4, max(xs), max(ys), max(zs))
             for vi, (x, y, z) in enumerate(pts):
                 struct.pack_into("<3f", buf, voff + vi * gmt_gtr2.RF2_VERTEX_SIZE, x, y, z)
             return bytes(buf)
@@ -442,9 +458,12 @@ class Gtr2FinalizeTests(unittest.TestCase):
             tex_dir = os.path.join(out_dir, "textures")
             os.makedirs(gmt_dir)
             os.makedirs(tex_dir)
+            with open(os.path.join(out_dir, venue + ".AIW"), "w", encoding="utf-8") as f:
+                f.write("[Waypoint]\nwp_pos=(0.0,0.0,0.0)\nwp_pos=(20.0,0.0,0.0)\n")
 
             small_tri = ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (0.0, 0.0, 4.0))
             huge_tri = ((0.0, 0.0, 0.0), (120.0, 0.0, 0.0), (0.0, 0.0, 80.0))
+            remote_tri = ((500.0, 0.0, 500.0), (504.0, 0.0, 500.0), (500.0, 0.0, 504.0))
             files_spec = [
                 ("xfinish.gmt", "xfinish", True, True, small_tri),
                 ("xsector1.gmt", "xsector1", True, True, small_tri),
@@ -453,6 +472,7 @@ class Gtr2FinalizeTests(unittest.TestCase):
                 ("1WALL_01.gmt", "1WALL_01", True, False, small_tri),
                 ("1GRASS_near.gmt", "1GRASS_near", True, False, small_tri),
                 ("1GRASS_far.gmt", "1GRASS_far", True, False, huge_tri),
+                ("1TERRAIN_remote.gmt", "1TERRAIN_remote", True, False, remote_tri),
                 ("skyboxi.gmt", "skyboxi", False, False, small_tri),
             ]
             rows = []
@@ -475,13 +495,16 @@ class Gtr2FinalizeTests(unittest.TestCase):
 
             # 1WALL keeps CollTarget=True but gets HATTarget=False.
             self.assertIn("MeshFile=1WALL_01.gmt CollTarget=True HATTarget=False", trk)
-            # 1ROAD keeps oversized faces untouched and remains HATTarget=True.
+            # 1ROAD keeps oversized wide faces untouched and remains HATTarget=True.
             self.assertIn("MeshFile=1ROAD_main.gmt CollTarget=True HATTarget=True", trk)
             self.assertEqual(gmt_gtr2.gtr2_gmt_face_count(os.path.join(stage, "gmt", "1ROAD_main.gmt")), 1)
             # Trackside 1GRASS_near stays HATTarget=True; far 1GRASS_far (>50m) gets emptied & disabled.
             self.assertIn("MeshFile=1GRASS_near.gmt CollTarget=True HATTarget=True", trk)
             self.assertEqual(gmt_gtr2.gtr2_gmt_face_count(os.path.join(stage, "gmt", "1GRASS_far.gmt")), 0)
             self.assertIn("MeshFile=1GRASS_far.gmt CollTarget=False HATTarget=False", trk)
+            # Remote 1TERRAIN_remote (>200m from AIW) gets CollTarget/HATTarget disabled and faces stripped.
+            self.assertIn("MeshFile=1TERRAIN_remote.gmt CollTarget=False HATTarget=False", trk)
+            self.assertEqual(gmt_gtr2.gtr2_gmt_face_count(os.path.join(stage, "gmt", "1TERRAIN_remote.gmt")), 0)
             # AC skyboxi.gmt is renamed to track_skyboxi.gmt without overwriting GTR2's skyboxi.gmt.
             self.assertTrue(os.path.isfile(os.path.join(stage, "gmt", "track_skyboxi.gmt")))
             self.assertIn("MeshFile=track_skyboxi.gmt", trk)

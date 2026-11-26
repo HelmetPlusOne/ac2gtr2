@@ -10,7 +10,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 
 ### TBD
 
-- **HAT crash fix for large AC tracks**: Strips zero-area degenerate collision faces and oversized (`> 50 m`) outer-terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
+- **HAT crash fix for large AC tracks**: Strips zero-area degenerate faces, long needle slivers (`> 50 m` span, `< 10 m` wide), and oversized (`> 50 m`) or distant (`> 200 m` from AIW) off-road terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
 
 ### 26 Nov 2026
 

@@ -854,9 +854,55 @@ BARRIER_MAT_PREFIXES = ("cwal_", "twall_", "grdr_", "cmwl_", "cema_")
 BARRIER_SURFACE_KEYS = ("WALL", "TYREWALL", "GUARDRAIL", "SAFER")
 OFFROAD_MAT_PREFIXES = ("gras_", "grvl_", "dirt_", "sand_")
 OFFROAD_SURFACE_KEYS = ("GRASS", "TERRAIN", "GRAVEL", "SAND", "DIRT")
-# Oversized outer-terrain triangles (>50m) in AC 1GRASS_* meshes cause GTR2's
-# 2D XZ HTree quadtree to explode in memory and abort inside SpecialFX::Init().
+# Oversized outer-terrain triangles (>50m) in AC 1GRASS_* / 1TERRAIN_* meshes
+# and unreachable background terrain (>200m from the AIW racing line) cause
+# GTR2's 2D XZ HTree quadtree to explode in memory inside SpecialFX::Init().
 MAX_TERRAIN_HAT_SPAN = 50.0
+FAR_OFFROAD_AIW_DIST = 200.0
+
+
+def load_aiw_waypoints_xz(aiw_path):
+    """Read ``(x, z)`` coordinates of all ``wp_pos`` waypoints from an AIW file."""
+    if not aiw_path or not os.path.isfile(aiw_path):
+        return []
+    with open(aiw_path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    return [
+        (float(m.group(1)), float(m.group(2)))
+        for m in re.finditer(r"wp_pos=\(([-\d.]+),[-\d.]+,([-\d.]+)\)", text)
+    ]
+
+
+def far_offroad_gmts(gmt_dir, exported, aiw_path, max_dist=FAR_OFFROAD_AIW_DIST,
+                     src_name_map=None):
+    """Return lowercased staged GMT names of off-road terrain >``max_dist`` from AIW."""
+    wps = load_aiw_waypoints_xz(aiw_path)
+    if not wps or max_dist is None or max_dist <= 0.0:
+        return set()
+    import gmt_gtr2
+    import numpy as np
+
+    step = max(1, len(wps) // 600)
+    wp_arr = np.asarray(wps[::step], dtype=np.float64)
+    wpx = wp_arr[:, 0]
+    wpz = wp_arr[:, 1]
+    thresh2 = float(max_dist) * float(max_dist)
+    src_map = src_name_map or {}
+    far = set()
+    for row in exported:
+        if not is_offroad_terrain_row(row):
+            continue
+        staged_low = row["gmt"].lower()
+        src_file = src_map.get(staged_low, row["gmt"])
+        bbox = gmt_gtr2.gmt_bbox_xz(os.path.join(gmt_dir, src_file))
+        if bbox is None:
+            continue
+        x0, x1, z0, z1 = bbox
+        dx = np.maximum(0.0, np.maximum(x0 - wpx, wpx - x1))
+        dz = np.maximum(0.0, np.maximum(z0 - wpz, wpz - z1))
+        if float(np.min(dx * dx + dz * dz)) > thresh2:
+            far.add(staged_low)
+    return far
 
 
 def _surface_stem(row):
@@ -1189,21 +1235,32 @@ def main():
     # required helper GMTs staged by stage_skybox() / stage_pit_gates().
     existing_gmts = {r["gmt"].lower() for r in exported}
     gmt_rename_map = {}
+    staged_to_src = {}
     for row in exported:
-        src_low = row["gmt"].lower()
+        src_name = row["gmt"]
+        src_low = src_name.lower()
         if src_low in RESERVED_HELPER_GMTS:
             dst = gmt_rename_map.get(src_low)
             if dst is None:
-                cand = "track_" + row["gmt"]
+                cand = "track_" + src_name
                 idx = 2
                 while cand.lower() in existing_gmts or cand.lower() in RESERVED_HELPER_GMTS:
-                    stem, ext = os.path.splitext(row["gmt"])
+                    stem, ext = os.path.splitext(src_name)
                     cand = "track_%s_%d%s" % (stem, idx, ext)
                     idx += 1
                 dst = cand
                 gmt_rename_map[src_low] = dst
                 existing_gmts.add(dst.lower())
             row["gmt"] = dst
+            staged_to_src[dst.lower()] = src_name
+
+    # Disable collision/HAT on unreachable outer-countryside off-road GMTs
+    # (>200m from the AIW racing line) so background mountains don't expand
+    # GTR2's HTree root bounding box across tens of kilometers.
+    far_offroad = far_offroad_gmts(
+        gmt_dir, exported, aiw_src, max_dist=FAR_OFFROAD_AIW_DIST,
+        src_name_map=staged_to_src,
+    )
 
     skybox = stage_skybox(gmts)
     max_shadow_range = 250.0 if args.track_shadows == "full" else 200.0
@@ -1220,8 +1277,9 @@ def main():
     receivers = 0
     for row in exported:
         name = instance_identifier(os.path.splitext(row["gmt"])[0], used_instances)
-        coll = "True" if row["physical"] else "False"
-        if row["physical"]:
+        is_phys = bool(row["physical"]) and (row["gmt"].lower() not in far_offroad)
+        coll = "True" if is_phys else "False"
+        if is_phys:
             phys += 1
         hat = "False" if (row.get("timing") or is_barrier_row(row)) else coll
         if row.get("timing"):
@@ -1361,7 +1419,8 @@ def main():
         collidable_gmts = {
             row["gmt"].lower()
             for row in exported
-            if row.get("physical") or row.get("timing")
+            if (row.get("physical") and row["gmt"].lower() not in far_offroad)
+            or row.get("timing")
         }
         collidable_gmts.update({"xpitin.gmt", "xpitout.gmt", "skyboxi.gmt"})
     else:
@@ -1370,8 +1429,11 @@ def main():
     offroad_gmts = {
         row["gmt"].lower()
         for row in exported
-        if is_offroad_terrain_row(row)
+        if is_offroad_terrain_row(row) and row["gmt"].lower() not in far_offroad
     }
+    if far_offroad:
+        print("  far terrain disabled %d unreachable off-road HAT instances (>%.0fm from AIW)"
+              % (len(far_offroad), FAR_OFFROAD_AIW_DIST))
 
     import gmt_gtr2
     converted = gmt_gtr2.convert_assets(
