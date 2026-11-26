@@ -2,7 +2,7 @@
 
 Standalone Windows distribution for converting Assetto Corsa (AC), tracks into GTR 2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR 2, or rFactor 2 is required. Drag and drop an AC, track folder (or `.zip` archive) onto `ac2gtr2.exe`.
 
-Converted tracks are automatically installed into the `out\` folder next to `ac2gtr2.exe`. To play a converted track in GTR2, copy `out\<track>\` into `<GTR2>\GameData\Locations\`.
+Converted tracks are automatically installed into the `out\` folder next to `ac2gtr2.exe`. To play a converted track in GTR 2, copy `out\<track>\` into `<GTR2>\GameData\Locations\`.
 
 Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported as an input - these tracks are only re-packaged with minimal changes (no Blender run) and conversion options are not supported for them.
 
@@ -12,8 +12,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 
 - **Stock Car Extreme (GSCE/SCE) track support**: Auto-detects SCE tracks, decrypts GMTs/textures, remaps Reiza shaders, recovers shared `ReizaCommon` textures, and fixes AIW/material compatibility.
 - **rFactor 1 track support**: Auto-detects rF1 tracks and `.zip` archives, unpacks `.mas` archives, converts GMT v2.00 meshes to GTR2 GMT v2.10, and generates GTR2 scenes, AIW, and UI images.
-- **`track_shadows` for rF1/SCE**: Applies `[track] track_shadows` (`compact` / `off` / `full`) to `.scn` -> `.trk` conversions; other AC options are ignored.
-- **Track brightness (`track_brightness`)**: Added `[track] track_brightness` (`0.0`–`1.0`, default `0.5`) to brighten daytime AC track lighting, materials, and diffuse textures.
+- **Track brightness (`track_brightness`)**: brightening the track is toned down, applies twice less brightness than in the previous version, so default value `0.5` produces the same results as `0.25` in the previous version.
 
 ### Initial Release
 
@@ -23,6 +22,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 - **Performance optimizations**: Added `track_shadows`, 250 m spatial mesh splitting, LOD culling, and tighter rearview clipping.
 - **Config file (`ac2gtr2.ini`)**: Added `[track]` settings for texture scaling, road smoothing, mesh coarsening, unused GMT stripping, and shadows.
 - **Upstream AC fixes**: Included MultiMap alpha/tint baking, DDS validation/re-encoding, skinned KN5 parsing, road smoothing, and 31-char instance name capping.
+- **Track brightness (`track_brightness`)**: Added `[track] track_brightness` (`0.0`–`1.0`, default `0.5`) to brighten daytime AC track lighting, materials, and diffuse textures.
 
 ## Usage
 
