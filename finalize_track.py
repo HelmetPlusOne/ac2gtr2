@@ -395,19 +395,19 @@ def gdb_lighting_colors(ambient=165, sun=255, brightness=0.0):
     """Compute GTR2 .gdb scene lighting RGB tuples for ``brightness`` in [0, 1].
 
     At ``brightness == 0.0`` returns exact baseline colors. Higher values lift
-    daytime, sunrise/sunset, and rainy-day ambient light while keeping night
-    lighting dark.
+    daytime, sunrise/sunset, and rainy-day ambient light up to a bright sunny
+    look at ``1.0`` (``DayAmbientColour=210``) while keeping night lighting dark.
     """
-    b = max(0.0, min(1.0, float(brightness or 0.0)))
+    t = 0.5 * max(0.0, min(1.0, float(brightness or 0.0)))
     amb = max(0, min(255, int(ambient)))
     sn = max(0, min(255, int(sun)))
     return {
-        "day_amb": _lerp_rgb((amb, amb, amb), (255, 255, 255), b),
-        "day_sun": _lerp_rgb((sn, sn, sn), (255, 255, 255), b),
-        "sunrise_amb": _lerp_rgb((146, 138, 125), (225, 215, 198), b),
-        "sunset_amb": _lerp_rgb((136, 121, 105), (220, 200, 172), b),
-        "rain_day_amb": _lerp_rgb((105, 105, 105), (190, 190, 190), b),
-        "rain_day_sun": _lerp_rgb((45, 45, 45), (135, 135, 135), b),
+        "day_amb": _lerp_rgb((amb, amb, amb), (255, 255, 255), t),
+        "day_sun": _lerp_rgb((sn, sn, sn), (255, 255, 255), t),
+        "sunrise_amb": _lerp_rgb((146, 138, 125), (225, 215, 198), t),
+        "sunset_amb": _lerp_rgb((136, 121, 105), (220, 200, 172), t),
+        "rain_day_amb": _lerp_rgb((105, 105, 105), (190, 190, 190), t),
+        "rain_day_sun": _lerp_rgb((45, 45, 45), (135, 135, 135), t),
     }
 
 
@@ -415,9 +415,9 @@ def _rgb565_brightness_luts(brightness):
     """Build monotonic RGB565 channel lookup tables (5-bit R/B, 6-bit G)."""
     import numpy as np
 
-    b = max(0.0, min(1.0, float(brightness)))
-    gain = 1.0 + 0.80 * b
-    gamma = 1.0 - 0.35 * b
+    t = 0.5 * max(0.0, min(1.0, float(brightness)))
+    gain = 1.0 + 0.80 * t
+    gamma = 1.0 - 0.35 * t
 
     def _curve(max_val):
         x = np.arange(max_val + 1, dtype=np.float64) / float(max_val)

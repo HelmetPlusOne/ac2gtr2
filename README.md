@@ -91,8 +91,9 @@ Useful options:
   `[track] track_shadows` for both Assetto Corsa and rFactor 1 tracks.
 - `--texture-scale`, `--texture-scale-min-size`, `--road-smoothness`,
   `--mesh-coarsening`, `--strip-unused-gmt-data`, and `--track-brightness`
-  (`0.0`..`1.0`) override `ac2gtr2.ini` (Assetto Corsa tracks only;
-  automatically ignored for rFactor 1 inputs).
+  (`0.0` disabled, `0.5` default subtle daylight lift, `1.0` bright sunny look)
+  override `ac2gtr2.ini` (Assetto Corsa tracks only; automatically ignored for
+  rFactor 1 inputs).
 
 ### rFactor 1 track inputs
 

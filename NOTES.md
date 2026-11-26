@@ -115,14 +115,16 @@ Measured across stock GTR2 tracks (`Monza`, `Barcelona`, `Spa`, `Bahrain`,
 ## Track brightness boost (`track_brightness`)
 
 - `[track] track_brightness` (and `--track-brightness`) accepts `[0.0, 1.0]`,
-  defaulting to `0.0` (disabled, byte-for-byte unchanged output).
+  defaulting to `0.5` (`0.0` disabled / byte-for-byte unchanged, `0.5` subtle
+  daylight lift, `1.0` bright sunny look).
 - When `> 0.0`, three GTR2 lighting levers are raised smoothly together during
-  `finalize_track.py` (so it also works with `--skip-geometry`):
+  `finalize_track.py` (so it also works with `--skip-geometry`), scaled by
+  `t = 0.5 * track_brightness`:
   1. **GMT material colors** (`gmt_gtr2.py`): lifts `Diffuse` and `Ambient` RGB
-     from AC's lower reflectance values toward `1.0` (keeping alpha, specular,
-     and emissive unchanged so night racing stays dark).
+     from AC's lower reflectance values halfway toward `1.0` at `1.0` (keeping
+     alpha, specular, and emissive unchanged so night racing stays dark).
   2. **Scene `.gdb` lighting** (`finalize_track.py`): lifts daytime, sunrise,
-     sunset, and rainy-day ambient lighting (`DayAmbientColour` up to `255` at
+     sunset, and rainy-day ambient lighting (`DayAmbientColour` up to `210` at
      `1.0`), leaving `NightAmbientColour` untouched.
   3. **Diffuse DDS textures** (`finalize_track.py`): brightens stage-0 diffuse
      `DXT1`/`DXT3`/`DXT5` textures directly on their RGB565 endpoints across all

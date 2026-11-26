@@ -694,21 +694,23 @@ def _bbox_corners(bbox_min, bbox_max):
 
 
 def _brighten_material_colors(m_colors, brightness):
-    """Lift GMT material Diffuse/Ambient RGB toward 1.0 by ``brightness`` in [0, 1].
+    """Lift GMT material Diffuse/Ambient RGB toward 1.0 by ``0.5 * brightness``.
 
-    Leaves alpha, specular, and emissive unchanged so transparency, specular
-    highlights, and night lighting stay natural.
+    At ``brightness == 0.0`` returns exact input bytes; ``1.0`` lifts halfway
+    toward 1.0 (bright sunny look). Leaves alpha, specular, and emissive
+    unchanged so transparency, specular highlights, and night lighting stay
+    natural.
     """
     b = float(brightness or 0.0)
     if b <= 0.0:
         return m_colors
-    b = min(1.0, b)
+    t = 0.5 * min(1.0, b)
     cols = list(struct.unpack("<16f", m_colors))
     if max(cols[0], cols[1], cols[2], cols[4], cols[5], cols[6]) <= 0.0:
         return m_colors
     for i in (0, 1, 2, 4, 5, 6):
         c = max(0.0, min(1.0, cols[i]))
-        cols[i] = c + (1.0 - c) * b
+        cols[i] = c + (1.0 - c) * t
     return struct.pack("<16f", *cols)
 
 

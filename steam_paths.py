@@ -44,7 +44,7 @@ DEFAULT_MESH_COARSENING = 0.0
 DEFAULT_STRIP_UNUSED_GMT_DATA = True
 DEFAULT_TRACK_SHADOWS = "compact"
 VALID_TRACK_SHADOWS = ("compact", "off", "full")
-DEFAULT_TRACK_BRIGHTNESS = 0.0
+DEFAULT_TRACK_BRIGHTNESS = 0.5
 
 
 def validate_track_brightness(brightness):

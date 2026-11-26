@@ -483,7 +483,7 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
     def test_track_brightness_config_materials_gdb_and_dds(self):
         # Config validation & INI loading.
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(steam_paths.load_config(tmp)["track_brightness"], 0.0)
+            self.assertEqual(steam_paths.load_config(tmp)["track_brightness"], 0.5)
             with open(os.path.join(tmp, "ac2gtr2.ini"), "w", encoding="utf-8") as f:
                 f.write("[track]\ntrack_brightness=0.65\n")
             cfg = steam_paths.load_config(tmp)
@@ -498,17 +498,17 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             steam_paths.validate_track_brightness(float("nan"))
 
-        # .gdb lighting interpolation: 0.0 unchanged, 1.0 reaches 255 daytime ambient.
+        # .gdb lighting interpolation: 0.0 unchanged, 0.5 -> 188, 1.0 -> 210 (bright sunny look).
         base_light = finalize_track.gdb_lighting_colors(165, 255, 0.0)
         mid_light = finalize_track.gdb_lighting_colors(165, 255, 0.5)
         max_light = finalize_track.gdb_lighting_colors(165, 255, 1.0)
         self.assertEqual(base_light["day_amb"], (165, 165, 165))
-        self.assertEqual(mid_light["day_amb"], (210, 210, 210))
-        self.assertEqual(max_light["day_amb"], (255, 255, 255))
+        self.assertEqual(mid_light["day_amb"], (188, 188, 188))
+        self.assertEqual(max_light["day_amb"], (210, 210, 210))
         self.assertGreater(max_light["sunrise_amb"][0], base_light["sunrise_amb"][0])
         self.assertGreater(max_light["rain_day_amb"][0], base_light["rain_day_amb"][0])
 
-        # GMT material colors: 0.0 byte-exact, 0.5 halfway, 1.0 full diffuse/ambient,
+        # GMT material colors: 0.0 byte-exact, 0.5 lifts 25% toward 1.0, 1.0 lifts 50% toward 1.0,
         # preserving alpha, specular, and emissive.
         raw_cols = struct.pack(
             "<16f",
@@ -519,14 +519,14 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         )
         self.assertEqual(gmt_gtr2._brighten_material_colors(raw_cols, 0.0), raw_cols)
         mid_cols = struct.unpack("<16f", gmt_gtr2._brighten_material_colors(raw_cols, 0.5))
-        self.assertAlmostEqual(mid_cols[0], 0.70, places=5)
-        self.assertAlmostEqual(mid_cols[4], 0.60, places=5)
+        self.assertAlmostEqual(mid_cols[0], 0.55, places=5)
+        self.assertAlmostEqual(mid_cols[4], 0.40, places=5)
         self.assertAlmostEqual(mid_cols[3], 0.85, places=5)
         self.assertAlmostEqual(mid_cols[8], 0.10, places=5)
         self.assertAlmostEqual(mid_cols[12], 0.00, places=5)
         max_cols = struct.unpack("<16f", gmt_gtr2._brighten_material_colors(raw_cols, 1.0))
-        self.assertEqual(tuple(round(x, 5) for x in max_cols[:3]), (1.0, 1.0, 1.0))
-        self.assertEqual(tuple(round(x, 5) for x in max_cols[4:7]), (1.0, 1.0, 1.0))
+        self.assertEqual(tuple(round(x, 5) for x in max_cols[:3]), (0.70, 0.75, 0.80))
+        self.assertEqual(tuple(round(x, 5) for x in max_cols[4:7]), (0.60, 0.65, 0.70))
         self.assertAlmostEqual(max_cols[12], 0.00, places=5)
 
         # DXT1 & DXT5 RGB565 endpoint brightening: preserves headers, alpha blocks,

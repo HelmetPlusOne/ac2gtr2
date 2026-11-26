@@ -230,7 +230,7 @@ def main():
     ap.add_argument("--track-shadows", choices=("compact", "off", "full"), default=None,
                     help="GTR2 track shadow casting mode: compact (default), off, or full (overrides ac2gtr2.ini [track] track_shadows)")
     ap.add_argument("--track-brightness", type=float, default=None,
-                    help="track brightness boost in [0.0, 1.0] (0.0 disabled, 1.0 very bright; overrides ac2gtr2.ini [track] track_brightness)")
+                    help="track brightness boost in [0.0, 1.0] (0.0 disabled, 0.5 default subtle lift, 1.0 bright sunny look; overrides ac2gtr2.ini [track] track_brightness)")
     ap.add_argument("--grain", default="2")
     ap.add_argument("--detail-metres", default="2.0",
                     help="how often the game repeats a second stage detail texture")
