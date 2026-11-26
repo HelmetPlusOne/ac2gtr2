@@ -25,18 +25,44 @@ def say(text):
 
 
 def track_folders(names):
-    """The shallowest folders holding .kn5 files, as zip paths ('' is the root)."""
-    found = set()
+    """The shallowest AC (.kn5) or rFactor 1 (.scn + .gdb) track folders in a zip."""
+    kn5_found = set()
+    scn_dirs = set()
+    gdb_dirs = set()
+    mas_dirs = set()
     for name in names:
         parts = name.split("/")
         if "__MACOSX" in parts or parts[-1].startswith("._"):
             continue                    # macOS metadata, not models
-        if parts[-1].lower().endswith(".kn5"):
-            found.add("/".join(parts[:-1]))
-    if not found:
+        leaf = parts[-1].lower()
+        parent = "/".join(parts[:-1])
+        if leaf.endswith(".kn5"):
+            kn5_found.add(parent)
+        elif leaf.endswith(".scn"):
+            scn_dirs.add(parent)
+        elif leaf.endswith(".gdb"):
+            gdb_dirs.add(parent)
+        elif leaf.endswith(".mas"):
+            mas_dirs.add(parent)
+
+    if kn5_found:
+        depth = min(f.count("/") + (1 if f else 0) for f in kn5_found)
+        return sorted(f for f in kn5_found if f.count("/") + (1 if f else 0) == depth)
+
+    # rFactor 1 track: layouts are folders holding both .scn and .gdb; if their
+    # parent holds .mas files (standard venue layout), return that venue folder.
+    rf1_layouts = scn_dirs & gdb_dirs
+    if not rf1_layouts:
         return []
-    depth = min(f.count("/") + (1 if f else 0) for f in found)
-    return sorted(f for f in found if f.count("/") + (1 if f else 0) == depth)
+    rf1_roots = set()
+    for lay in rf1_layouts:
+        parent = lay.rsplit("/", 1)[0] if "/" in lay else ""
+        if lay and (parent in mas_dirs or len([l for l in rf1_layouts if (l.rsplit("/", 1)[0] if "/" in l else "") == parent]) > 1):
+            rf1_roots.add(parent)
+        else:
+            rf1_roots.add(lay)
+    depth = min(f.count("/") + (1 if f else 0) for f in rf1_roots)
+    return sorted(f for f in rf1_roots if f.count("/") + (1 if f else 0) == depth)
 
 
 def extract(zip_path):
@@ -51,7 +77,7 @@ def extract(zip_path):
         names = [i.filename for i in z.infolist()]
         folders = track_folders(names)
         if not folders:
-            raise SystemExit("%s holds no Assetto Corsa track (no .kn5 models)"
+            raise SystemExit("%s holds no Assetto Corsa (.kn5) or rFactor 1 (.scn/.gdb) track"
                              % os.path.basename(zip_path))
         if len(folders) > 1:
             raise SystemExit("%s holds %d tracks (%s). Extract it and give the "

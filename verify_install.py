@@ -108,15 +108,19 @@ def _gtr2_gmt_info(b):
         ntex = struct.unpack_from("<I", b, pos)[0]
         pos += 4
         for _ in range(ntex):
-            if pos + gmt_gtr2.GTR2_TEXTURE_SIZE > len(b):
+            if pos + 80 > len(b):
+                return None
+            sz = gmt_gtr2.tex_record_size(b, pos)
+            if pos + sz > len(b):
                 return None
             raw = b[pos:pos + 64].split(b"\x00", 1)[0]
             tname = raw.decode("ascii", errors="replace")
             if tname and tname.upper() not in PSEUDO_TEXTURES:
                 names.add(raw)
                 tex_flags[tname] = struct.unpack_from("<I", b, pos + TEX_FLAGS_OFFSET)[0]
-                alpha_refs[tname] = b[pos + ALPHA_REF_OFFSET]
-            pos += gmt_gtr2.GTR2_TEXTURE_SIZE
+                if pos + ALPHA_REF_OFFSET < len(b):
+                    alpha_refs[tname] = b[pos + ALPHA_REF_OFFSET]
+            pos += sz
     return {
         "textures": names,
         "shaders": shaders,
@@ -197,12 +201,204 @@ def installed_scene_path(installed, venue):
     return os.path.join(installed, venue + ".trk")
 
 
+def verify_rf1_install(installed, out_dir):
+    """Verify an rFactor 1 -> GTR2 installed track folder."""
+    import rf1_track
+    import steam_paths
+
+    problems = []
+    gdbs = sorted(
+        f for f in os.listdir(installed)
+        if f.lower().endswith(".gdb") and os.path.isfile(os.path.join(installed, f))
+    ) if os.path.isdir(installed) else []
+    if not gdbs:
+        problems.append("no .gdb layout files found in %s" % installed)
+
+    # Gather all installed GMTs (gmt/ and gmt_*/) and textures (maps/ and maps_*/).
+    gmt_paths = {}
+    map_paths = {}
+    for folder, _, names in os.walk(installed):
+        rel = os.path.relpath(folder, installed)
+        top = rel.split(os.sep)[0].lower() if rel != "." else ""
+        for name in names:
+            low = name.lower()
+            full = os.path.join(folder, name)
+            if low.endswith(".gmt") and (top == "gmt" or top.startswith("gmt_")):
+                gmt_paths.setdefault(low, []).append(full)
+            elif os.path.splitext(low)[1] in rf1_track.TEXTURE_EXTS and (
+                top == "maps" or top.startswith("maps_") or top == ""
+            ):
+                map_paths.setdefault(low, []).append(full)
+
+    # Check GTR2 SHARED textures as valid external texture sources.
+    shared_tex = rf1_track._gtr2_shared_textures(steam_paths.GTR2_DIR, steam_paths.MASUNPACK)
+    on_disk_lower = set(map_paths.keys()) | shared_tex
+
+    # 1. Verify every GMT is valid GTR2 GMT v2.10 with 0 trailing bytes,
+    #    no rF1 skybox GMTs shadow GTR2 SHARED, and every texture (including
+    #    skyboxi.gmt's _invisible.dds) is installed.
+    bad_gmt = []
+    shadowed_sky = []
+    missing_tex = set()
+    total_gmts = 0
+    for low, paths in sorted(gmt_paths.items()):
+        if low in rf1_track.SKYBOX_GMTS and low != "skyboxi.gmt":
+            shadowed_sky.append(low)
+        for path in paths:
+            total_gmts += 1
+            with open(path, "rb") as fh:
+                b = fh.read()
+            g2 = _gtr2_gmt_info(b)
+            if g2 is None or g2["trailing"] != 0:
+                bad_gmt.append(os.path.basename(path))
+                continue
+            for t in g2["textures"]:
+                tname = t.decode("ascii", errors="replace").strip()
+                tl = tname.lower()
+                if not tl or tl in on_disk_lower:
+                    continue
+                stem = os.path.splitext(tl)[0]
+                if not any(
+                    k == stem + ".dds" or k.startswith(stem) and k.endswith((".dds", ".tga"))
+                    for k in on_disk_lower
+                ):
+                    missing_tex.add(tname)
+
+    if bad_gmt:
+        problems.append("installed GMTs not valid GTR2 GMT v2.10: %s" % bad_gmt[:5])
+    if shadowed_sky:
+        problems.append("rF1 skybox GMTs shadow GTR2 SHARED skybox: %s" % shadowed_sky[:5])
+    if missing_tex:
+        problems.append("textures referenced but not installed: %s" % sorted(missing_tex)[:5])
+
+    # 2. Verify every installed DDS is valid DX9 pow2 DXT1/3/5 with exact byte size.
+    unloadable = []
+    total_dds = 0
+    for low, paths in sorted(map_paths.items()):
+        if not low.endswith(".dds"):
+            continue
+        for inst_dds in paths:
+            total_dds += 1
+            with open(inst_dds, "rb") as fh:
+                head = fh.read(128)
+            if len(head) < 128 or head[:4] != b"DDS ":
+                unloadable.append(os.path.basename(inst_dds) + " (not DDS)")
+                continue
+            h, w = struct.unpack_from("<II", head, 12)
+            mips = struct.unpack_from("<I", head, 28)[0]
+            fourcc = head[84:88]
+            caps2 = struct.unpack_from("<I", head, 112)[0]
+            is_cube = bool(caps2 & 0x200)
+            exp_bytes = expected_dds_bytes(w, h, fourcc, mips)
+            if is_cube and exp_bytes is not None:
+                exp_bytes = 128 + 6 * (exp_bytes - 128)
+            actual_bytes = os.path.getsize(inst_dds)
+            if min(w, h) < 4:
+                unloadable.append(os.path.basename(inst_dds) + " (under 4x4)")
+            elif (w & (w - 1)) != 0 or (h & (h - 1)) != 0:
+                unloadable.append("%s (non-pow2 %dx%d)" % (os.path.basename(inst_dds), w, h))
+            elif fourcc not in (b"DXT1", b"DXT3", b"DXT5"):
+                unloadable.append("%s (format %r)" % (os.path.basename(inst_dds), fourcc))
+            elif exp_bytes is not None and actual_bytes != exp_bytes:
+                unloadable.append("%s (malformed DDS size %d != %d)"
+                                  % (os.path.basename(inst_dds), actual_bytes, exp_bytes))
+    if unloadable:
+        problems.append("textures GTR2 cannot load: %s" % unloadable[:5])
+
+    # 3. Verify every layout's .trk, .AIW, .grd, unique VenueName, MeshFile= refs,
+    #    garagespots <= 3, and <=31-char Instance= names.
+    avail_gmts = set(gmt_paths.keys()) | rf1_track.SKYBOX_GMTS
+    missing_meshes = set()
+    overlong_instances = []
+    seen_venues = {}
+    dup_venues = []
+    bad_garages = []
+    for gdb in gdbs:
+        stem = os.path.splitext(gdb)[0]
+        base = os.path.join(installed, stem)
+        gdb_txt = open(os.path.join(installed, gdb), encoding="utf-8", errors="replace").read()
+        m_vn = re.search(r"(?im)^\s*VenueName\s*=\s*(.+)", gdb_txt)
+        if m_vn:
+            vn = m_vn.group(1).strip()
+            vkey = vn.casefold()
+            if vkey in seen_venues:
+                dup_venues.append("%r (%s, %s)" % (vn, seen_venues[vkey], gdb))
+            else:
+                seen_venues[vkey] = gdb
+        for ext in (".trk", ".AIW", ".grd"):
+            if not os.path.isfile(base + ext):
+                problems.append("missing companion file: %s" % (stem + ext))
+        aiw_path = base + ".AIW"
+        if os.path.isfile(aiw_path):
+            aiw_head = open(aiw_path, encoding="utf-8", errors="replace").read(4096)
+            m_gs = re.search(r"(?im)^\s*garagespots\s*=\s*(\d+)", aiw_head)
+            if m_gs and int(m_gs.group(1)) > 3:
+                bad_garages.append("%s (garagespots=%s)" % (stem + ".AIW", m_gs.group(1)))
+        trk_path = base + ".trk"
+        if os.path.isfile(trk_path):
+            scene = open(trk_path, encoding="utf-8", errors="replace").read()
+            for mf in re.findall(r"(?i)\bMeshFile\s*=\s*(\S+)", scene):
+                if mf.lower() not in avail_gmts:
+                    missing_meshes.add(mf)
+            for inst in re.findall(r"(?i)\bInstance=([^\s\{\}]+)", scene):
+                if len(inst) > 31:
+                    overlong_instances.append(inst)
+
+    # Check multi-layout stem/prefix uniqueness (GTR2 requires distinct stem[:4]
+    # and non-prefix VenueName / layout stems so all layouts are selectable).
+    if len(gdbs) > 1:
+        stems = [os.path.splitext(g)[0] for g in gdbs]
+        lows = [s.lower() for s in stems]
+        if len({s[:4] for s in lows}) < len(lows):
+            problems.append("multi-layout .gdb stems share first 4 chars: %s" % stems)
+        for i in range(len(lows)):
+            for j in range(len(lows)):
+                if i != j and lows[j].startswith(lows[i]):
+                    problems.append("layout stem %r is a prefix of %r" % (stems[i], stems[j]))
+        vlist = list(seen_venues.items())
+        for i in range(len(vlist)):
+            for j in range(len(vlist)):
+                if i != j and vlist[j][0].startswith(vlist[i][0]):
+                    problems.append(
+                        "VenueName prefix collision: %s (%r) vs %s (%r)"
+                        % (vlist[i][1], vlist[i][0], vlist[j][1], vlist[j][0])
+                    )
+
+    if dup_venues:
+        problems.append("duplicate VenueName across .gdb layouts: %s" % dup_venues[:5])
+    if bad_garages:
+        problems.append("AIW garagespots exceeds GTR2 max (3): %s" % bad_garages[:5])
+    if missing_meshes:
+        problems.append("TRK references missing GMT meshes: %s" % sorted(missing_meshes)[:5])
+    if overlong_instances:
+        problems.append("TRK Instance= names exceed gMotor 31-char limit: %d, e.g. %s"
+                        % (len(overlong_instances), overlong_instances[:4]))
+
+    print("installed:   %s (rFactor 1 source)" % installed)
+    print("layouts:     %d (%s)" % (len(gdbs), ", ".join(os.path.splitext(g)[0] for g in gdbs)))
+    print("gmts:        %d GTR2 v2.10 verified (%d bad)" % (total_gmts - len(bad_gmt), len(bad_gmt)))
+    print("textures:    %d media (%d DX9 DDS verified), %d missing"
+          % (len(map_paths), total_dds, len(missing_tex)))
+    print()
+    if problems:
+        print("PROBLEMS")
+        for p in problems:
+            print("  - %s" % p)
+        return 1
+    print("all checks passed")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("installed", help="GTR2 GameData\\Locations\\<track> folder")
     ap.add_argument("out_dir", help="out/<track> from the converter")
     args = ap.parse_args()
     installed, out_dir = args.installed, args.out_dir
+    if os.path.isfile(os.path.join(out_dir, "rf1_manifest.json")) or not os.path.isfile(
+        os.path.join(out_dir, "material_map.json")
+    ):
+        return verify_rf1_install(installed, out_dir)
     gmt_dir = os.path.join(installed, "gmt")
     map_dir = os.path.join(installed, "maps")
     source_gmt_dir = os.path.join(out_dir, "gmt")
@@ -291,7 +487,11 @@ def main():
             h, w = struct.unpack_from("<II", head, 12)
             mips = struct.unpack_from("<I", head, 28)[0]
             fourcc = head[84:88]
+            caps2 = struct.unpack_from("<I", head, 112)[0]
+            is_cube = bool(caps2 & 0x200)
             exp_bytes = expected_dds_bytes(w, h, fourcc, mips)
+            if is_cube and exp_bytes is not None:
+                exp_bytes = 128 + 6 * (exp_bytes - 128)
             actual_bytes = os.path.getsize(inst_dds)
             if min(w, h) < 4:
                 unloadable.append(t + " (under 4x4)")

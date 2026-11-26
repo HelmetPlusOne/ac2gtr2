@@ -1,10 +1,16 @@
-# Assetto Corsa to GTR2 — Standalone Converter
+# Assetto Corsa / rFactor 1 to GTR2 — Standalone Track Converter
 
-Standalone Windows distribution for converting Assetto Corsa (AC) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC track folder onto `ac2gtr2.exe`.
+Standalone Windows distribution for converting Assetto Corsa (AC) and rFactor 1 (rF1) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC or rF1 track folder (or `.zip` archive) onto `ac2gtr2.exe`.
 
 Converted tracks are automatically installed into the `out\` folder next to `ac2gtr2.exe`. To play a converted track in GTR2, copy `out\<track>\` into `<GTR2>\GameData\Locations\`.
 
 ## Changelog
+
+### rFactor 1 Input Support & Track Brightness
+
+- **Automatic rFactor 1 (`.scn` + `.gdb` + `.mas`) track conversion (`rf1_track.py`)**: Detects AC vs rFactor 1 track folders and `.zip` archives automatically, unpacks `.mas` archives via `masunpack.exe`, converts rF1 GMT v2.00 meshes directly to GTR2 GMT v2.10 (fixing per-submesh material indices, remapping rF1-only shaders to stock `GFX.GTR` shaders, appending required `MATH` stages for `L2BUMPSPECMAPT0`/`L2BUMPSPECT0`, supporting animated/BIK textures, and remapping `.tdf` surface prefixes to `specialfx.tec`), sanitizes spaces in texture filenames, clamps `.AIW` `garagespots` to `<= 3`, assigns GTR2-safe multi-layout IDs and `VenueName` entries, and composes GTR2 menu/loading images.
+- **`track_shadows` support in rF1 mode**: Applies `[track] track_shadows` (`compact` / `off` / `full`, or `--track-shadows`) to rF1 `.scn` -> `.trk` conversion while always stripping `Dynamic, Texture` casters; all other AC-specific conversion options remain ignored for rF1 tracks.
+- **Track brightness boost (`track_brightness`)**: Added `[track] track_brightness` (`[0.0, 1.0]`, default `0.0`, CLI `--track-brightness`) for AC tracks, smoothly brightening GMT diffuse/ambient material colors, daytime `.gdb` scene lighting, and stage-0 diffuse DDS textures while keeping night lighting dark.
 
 ### Initial Release
 

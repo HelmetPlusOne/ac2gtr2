@@ -13,7 +13,9 @@ import convert_multiple_tracks
 import finalize_track
 import fix_textures
 import gmt_gtr2
+import rf1_track
 import steam_paths
+import track_zip
 import verify_install
 
 
@@ -597,6 +599,333 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
                 f.write(gmt_gtr2.convert_rf2_to_gtr2(rf2_bytes, track_brightness=0.5))
             diff_texs = gmt_gtr2.collect_diffuse_textures(gmt_dir)
             self.assertEqual(diff_texs, {"road_diff.dds"})
+
+    def test_detects_ac_vs_rf1_and_rf1_zip_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ac_dir = os.path.join(tmp, "ac_track")
+            os.makedirs(ac_dir)
+            with open(os.path.join(ac_dir, "track.kn5"), "wb") as f:
+                f.write(b"sc6969")
+            self.assertEqual(rf1_track.detect_track_type(ac_dir), "ac")
+
+            rf1_dir = os.path.join(tmp, "rf1_venue")
+            lay_a = os.path.join(rf1_dir, "LayoutA")
+            lay_b = os.path.join(rf1_dir, "LayoutB")
+            os.makedirs(lay_a)
+            os.makedirs(lay_b)
+            with open(os.path.join(rf1_dir, "venue.mas"), "wb") as f:
+                f.write(b"MAS")
+            for lay_dir, stem in ((lay_a, "LayoutA"), (lay_b, "LayoutB")):
+                with open(os.path.join(lay_dir, stem + ".scn"), "w", encoding="utf-8") as f:
+                    f.write("CUBEASF\n")
+                with open(os.path.join(lay_dir, stem + ".gdb"), "w", encoding="utf-8") as f:
+                    f.write("%s\n{\n}\n" % stem)
+
+            self.assertEqual(rf1_track.detect_track_type(rf1_dir), "rf1")
+            self.assertEqual(rf1_track.rf1_layout_names(rf1_dir), ["LayoutA", "LayoutB"])
+            # Direct layout folder resolves parent as asset_root.
+            root, lays = rf1_track.find_rf1_layouts(lay_a)
+            self.assertEqual(os.path.normcase(root), os.path.normcase(rf1_dir))
+            self.assertEqual([l["name"] for l in lays], ["LayoutA"])
+
+        # track_zip detects rF1 zip folders when no .kn5 exists.
+        names = [
+            "Miami22/miami22.mas",
+            "Miami22/HRS/HRS.scn",
+            "Miami22/HRS/HRS.gdb",
+        ]
+        self.assertEqual(track_zip.track_folders(names), ["Miami22"])
+
+    def test_rf1_gmt_v200_conversion_scn_to_trk_and_gdb(self):
+        # Build a synthetic rF1 GMT v2.00 with 2 meshes / 2 materials:
+        #   mesh 0 -> mat 0 (rdax_main, L2USEVERTEXONLY + animated texture)
+        #   mesh 1 -> mat 1 at +0x38 (L2BUMPSPECMAPT0 with 3 rF1 stages -> 5 GTR2 stages w/ 2 MATH)
+        hdr = bytearray(gmt_gtr2.RF1_HEADER_MIN_SIZE)
+        struct.pack_into("<I", hdr, 4, 0x04000020)
+        struct.pack_into("<f", hdr, 0x008, 12.5)
+        struct.pack_into("<2f", hdr, 0x0E4, 0.0, 2500.0)
+        hdr[0x194:0x1D4] = gmt_gtr2._pad_ascii("rf1_road", 64)
+
+        moff = len(hdr)
+        mesh_desc0 = bytearray(gmt_gtr2.RF1_MESH_SIZE)
+        mesh_desc1 = bytearray(gmt_gtr2.RF1_MESH_SIZE)
+        foff = moff + 2 * gmt_gtr2.RF1_MESH_SIZE
+        face = struct.pack("<4H2I4f", 0, 1, 2, 2, 0, 0, 0.0, 1.0, 0.0, 2.0)
+        noff = foff + len(face)
+        norm = struct.pack("<3fI", 0.0, 1.0, 0.0, 0)
+        voff = noff + len(norm)
+        verts = (
+            struct.pack("<6f2I", 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF, 0)
+            + struct.pack("<6f2I", 4.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0xFFFFFFFF, 0)
+            + struct.pack("<6f2I", 0.0, 2.0, 4.0, 0.0, 1.0, 0.0, 0xFFFFFFFF, 0)
+        )
+        uvoff = voff + len(verts)
+        uvs = struct.pack("<8f", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) * 3
+        trioff = uvoff + len(uvs)
+        tris = struct.pack("<3H", 0, 1, 2)
+        mat_off = trioff + len(tris)
+
+        struct.pack_into(
+            "<10I", mesh_desc0, 0,
+            0x20004011, voff - 4, 0, uvoff - 4, 0, 0, 3, 0, 3, trioff - 4,
+        )
+        struct.pack_into("<I", mesh_desc0, 0x38, 0)
+        struct.pack_into("<I", mesh_desc0, 0x4C, 0xFFFFFFFF)
+        struct.pack_into(
+            "<10I", mesh_desc1, 0,
+            0x20004011, voff - 4, 0, uvoff - 4, 0, 0, 3, 0, 3, trioff - 4,
+        )
+        struct.pack_into("<I", mesh_desc1, 0x38, 1)
+        struct.pack_into("<I", mesh_desc1, 0x4C, 0xFFFFFFFF)
+        struct.pack_into(
+            "<8I", hdr, 0x174,
+            2, moff - 4, 1, foff - 4, 1, noff - 4, 0, voff - 4,
+        )
+        struct.pack_into("<I", hdr, 0, mat_off - 4)
+
+        mat = bytearray()
+        mat.extend(struct.pack("<I", 2))
+        # Material 0: rdax_main, L2USEVERTEXONLY, static + 3-frame animated tex.
+        mat.extend(gmt_gtr2._pad_ascii("rdax_main", 64))
+        mat.extend(struct.pack("<I", 0x68900003))
+        mat.extend(struct.pack("<16f", *([1.0, 1.0, 1.0, 1.0] * 3 + [0.0, 0.0, 0.0, 1.0])))
+        mat.extend(struct.pack("<2If", 2, 1, 1.0))
+        for si, (sname, tc) in enumerate((("L0DIFFUSET0", 1), ("L1DIFFUSET0", 1), ("L2USEVERTEXONLY", 0))):
+            sb = bytearray(gmt_gtr2.GTR2_SHADER_INFO_SIZE)
+            struct.pack_into("<2I", sb, 0, si, tc)
+            sb[8:72] = gmt_gtr2._pad_ascii(sname, 64)
+            mat.extend(sb)
+        mat.extend(bytes(gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD))
+        mat.extend(struct.pack("<I", 2))
+        tb1 = bytearray(gmt_gtr2.GTR2_TEXTURE_SIZE)
+        tb1[:64] = gmt_gtr2._pad_ascii("road.tga", 64)
+        struct.pack_into("<IiII", tb1, 64, 0x18, -1, 1, 1)
+        mat.extend(tb1)
+        tb2 = bytearray(gmt_gtr2.GTR2_TEXTURE_SIZE + 4 * 3 + 12)
+        tb2[:64] = gmt_gtr2._pad_ascii("flag.dds", 64)
+        struct.pack_into("<IiII", tb2, 64, 0x18, -1, 3, 3)
+        struct.pack_into("<3I", tb2, 80, 0, 1, 2)
+        mat.extend(tb2)
+
+        # Material 1: L2BUMPSPECMAPT0 with 3 rF1 textures (must expand to 5 with 2 MATH).
+        mat.extend(gmt_gtr2._pad_ascii("road_bump", 64))
+        mat.extend(struct.pack("<I", 0x68900003))
+        mat.extend(struct.pack("<16f", *([1.0, 1.0, 1.0, 1.0] * 3 + [0.0, 0.0, 0.0, 1.0])))
+        mat.extend(struct.pack("<2If", 2, 1, 1.0))
+        for first_t, tc, sname in ((0, 1, "L0DIFFUSET0"), (1, 1, "L1DIFFUSET0"), (2, 3, "L2BUMPSPECMAPT0")):
+            sb = bytearray(gmt_gtr2.GTR2_SHADER_INFO_SIZE)
+            struct.pack_into("<2I", sb, 0, first_t, tc)
+            sb[8:72] = gmt_gtr2._pad_ascii(sname, 64)
+            mat.extend(sb)
+        mat.extend(bytes(gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD))
+        mat.extend(struct.pack("<I", 5))
+        for tname in ("road.tga", "road.tga", "road.tga", "road_s.dds", "road_b.dds"):
+            tb = bytearray(gmt_gtr2.GTR2_TEXTURE_SIZE)
+            tb[:64] = gmt_gtr2._pad_ascii(tname, 64)
+            struct.pack_into("<IiII", tb, 64, 0x18, -1, 1, 1)
+            mat.extend(tb)
+
+        rf1_raw = bytes(hdr + mesh_desc0 + mesh_desc1 + face + norm + verts + uvs + tris + mat)
+        self.assertTrue(gmt_gtr2.is_rf1_gmt(rf1_raw))
+        gtr2_raw = gmt_gtr2.convert_rf1_to_gtr2(
+            rf1_raw,
+            tex_resolver=lambda t: "road.dds" if t.lower() == "road.tga" else t,
+        )
+        self.assertTrue(gmt_gtr2.is_gtr2_gmt(gtr2_raw))
+        info = verify_install._gtr2_gmt_info(gtr2_raw)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["trailing"], 0)
+        self.assertEqual(info["shaders"], ["L2USEVERTEXPIXEL", "L2BUMPSPECMAPT0"])
+        self.assertIn(b"road.dds", info["textures"])
+        self.assertIn(b"flag.dds", info["textures"])
+        self.assertEqual(gtr2_raw.count(b"MATH\x00"), 2)
+        self.assertIn(b"road_rdax_main", gtr2_raw)
+        # Verify mesh 0 -> mat 0 and mesh 1 -> mat 1 in GTR2 108-byte mesh descriptors.
+        out_moff = struct.unpack_from("<I", gtr2_raw, 0x170)[0] + 4
+        self.assertEqual(struct.unpack_from("<I", gtr2_raw, out_moff + 4)[0], 0)
+        self.assertEqual(struct.unpack_from("<I", gtr2_raw, out_moff + gmt_gtr2.GTR2_MESH_SIZE + 4)[0], 1)
+        # plane_d = dot((0,1,0), (0,2,0)) = 2.0
+        out_foff = struct.unpack_from("<I", gtr2_raw, 0x178)[0] + 4
+        plane_d = struct.unpack_from("<f", gtr2_raw, out_foff + 16)[0]
+        self.assertAlmostEqual(plane_d, 2.0, places=4)
+
+        # rF1-only shaders absent from GTR2 GFX.GTR map to stage-compatible stock shaders.
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2USEVERTEXONLY"), "L2USEVERTEXPIXEL")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L0CMAPADDT0"), "L0CMAPT0")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L1CMAPADDT0"), "L1CMAPT0")
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2CMAPADDT0"), "L2CMAPT0")
+        self.assertEqual(
+            gmt_gtr2._remap_rf1_shader_name("L2DIFFUSET0LERPT1XT2T3VERTEXALPHA"),
+            "L2DIFFUSET0T1XT2T3",
+        )
+        self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2DIFFUSET0"), "L2DIFFUSET0")
+
+        # Test .scn -> .trk and .gdb conversion across track_shadows modes.
+        with tempfile.TemporaryDirectory() as tmp:
+            gmt_dir = os.path.join(tmp, "gmt")
+            os.makedirs(gmt_dir)
+            with open(os.path.join(gmt_dir, "road01.gmt"), "wb") as f:
+                f.write(gtr2_raw)
+            metrics = rf1_track._collect_gmt_metrics([gmt_dir])
+            self.assertIn("road01.gmt", metrics)
+            self.assertAlmostEqual(metrics["road01.gmt"][0], 12.5, places=3)
+            self.assertEqual(metrics["road01.gmt"][1], 2)
+
+            scn = os.path.join(tmp, "Test.scn")
+            with open(scn, "w", encoding="utf-8") as f:
+                f.write(
+                    "CUBEASF\n"
+                    "SearchPath=Test\n"
+                    "MASFile=test.mas\n"
+                    "MaxShadowRange(350.00)\n"
+                    "Light=Direct00\n{\n  Type=Directional Color=(255,255,255)\n}\n"
+                    "Instance=skyboxi\n{\n  MeshFile=horizon.gmt\n}\n"
+                    "Instance=very_long_rf1_instance_name_exceeding_thirty_one_chars\n"
+                    "{\n  MeshFile=road01.gmt CollTarget=True HATTarget=True ShadowReceiver=True "
+                    "ShadowCaster=(Dynamic, Texture, 256, 256)\n}\n"
+                    "Instance=small_solid\n"
+                    "{\n  MeshFile=small_hut.gmt CollTarget=True HATTarget=False ShadowReceiver=True\n"
+                    "  ShadowCaster=(Static, Solid, 128, 128)\n"
+                    "  ShadowCaster=(Dynamic,Texture,32,32)\n}\n"
+                    "Instance=med_solid\n"
+                    "{\n  MeshFile=med_stand.gmt CollTarget=False HATTarget=False ShadowReceiver=True\n"
+                    "  ShadowObject=(Static, Solid, 256, 256)\n}\n"
+                    "Instance=huge_solid\n"
+                    "{\n  MeshFile=huge_stand.gmt CollTarget=False HATTarget=False\n"
+                    "  ShadowCaster=(Static, Solid, 128, 128)\n}\n"
+                    "Instance=static_tex\n"
+                    "{\n  MeshFile=tree01.gmt CollTarget=False HATTarget=False\n"
+                    "  ShadowCaster=(Static, Texture, 256, 256)\n}\n"
+                    "Instance=missing_obj\n{\n  MeshFile=does_not_exist.gmt\n}\n"
+                )
+            avail = {"road01.gmt", "small_hut.gmt", "med_stand.gmt", "huge_stand.gmt", "tree01.gmt"}
+            fake_metrics = {
+                "road01.gmt": (12.5, 100),
+                "small_hut.gmt": (15.0, 200),
+                "med_stand.gmt": (45.0, 1500),
+                "huge_stand.gmt": (90.0, 1500),
+                "tree01.gmt": (10.0, 50),
+            }
+
+            # full mode: keeps static solid/texture casters, all receivers, and authored range,
+            # while still stripping Dynamic, Texture casters.
+            trk_full, stats_full = rf1_track.convert_scn_to_trk(
+                scn, "TestVenue", "Test", avail, "Instance=skyboxi\n{\n}\n",
+                track_shadows="full", gmt_metrics=fake_metrics,
+            )
+            self.assertEqual(stats_full["instances"], 5)
+            self.assertEqual(stats_full["skipped_missing"], 1)
+            self.assertEqual(stats_full["renamed_long"], 1)
+            self.assertEqual(stats_full["stripped_dynamic_casters"], 2)
+            self.assertEqual(stats_full["shadow_casters"], 4)
+            self.assertEqual(stats_full["shadow_receivers"], 3)
+            self.assertIn("MaxShadowRange=(350.0)", trk_full)
+            self.assertIn("ShadowCaster=(Static, Solid, 128, 128)", trk_full)
+            self.assertIn("ShadowCaster=(Static, Texture, 256, 256)", trk_full)
+            self.assertIn("ShadowObject=(Static, Solid, 256, 256)", trk_full)
+            self.assertNotIn("ShadowCaster=(Dynamic", trk_full)
+            self.assertNotIn("does_not_exist.gmt", trk_full)
+            self.assertNotIn("Type=Directional", trk_full)
+            for inst in __import__("re").findall(r"(?i)\bInstance=([^\s\{\}]+)", trk_full):
+                self.assertLessEqual(len(inst), 31)
+
+            # compact mode (default): caps range to 200m, keeps ShadowReceiver=True only on
+            # HATTarget=True, strips Texture & >60m casters, downsizes compact solid casters.
+            trk_cmp, stats_cmp = rf1_track.convert_scn_to_trk(
+                scn, "TestVenue", "Test", avail, "Instance=skyboxi\n{\n}\n",
+                track_shadows="compact", gmt_metrics=fake_metrics,
+            )
+            self.assertIn("MaxShadowRange=(200.0)", trk_cmp)
+            self.assertEqual(stats_cmp["shadow_casters"], 2)
+            self.assertEqual(stats_cmp["shadow_receivers"], 1)
+            self.assertEqual(stats_cmp["stripped_receivers"], 2)
+            self.assertIn("ShadowCaster=(Static, Solid, 32, 32)", trk_cmp)
+            self.assertIn("ShadowObject=(Static, Solid, 64, 64)", trk_cmp)
+            self.assertNotIn("Texture", trk_cmp)
+            self.assertNotIn("128, 128", trk_cmp)
+            self.assertNotIn("256, 256", trk_cmp)
+
+            # off mode: strips all casters, caps range to 200m, keeps HATTarget=True receivers.
+            trk_off, stats_off = rf1_track.convert_scn_to_trk(
+                scn, "TestVenue", "Test", avail, "Instance=skyboxi\n{\n}\n",
+                track_shadows="off", gmt_metrics=fake_metrics,
+            )
+            self.assertIn("MaxShadowRange=(200.0)", trk_off)
+            self.assertEqual(stats_off["shadow_casters"], 0)
+            self.assertEqual(stats_off["shadow_receivers"], 1)
+            self.assertNotIn("ShadowCaster=", trk_off)
+            self.assertNotIn("ShadowObject=", trk_off)
+
+            # Texture filename space sanitizing & resolver.
+            self.assertEqual(rf1_track.sanitize_texture_filename("ASFALTO 4.DDS"), "ASFALTO_4.DDS")
+            self.assertEqual(rf1_track.sanitize_texture_filename("ABU DHABI  DOS.DDS"), "ABU_DHABI_DOS.DDS")
+            res = rf1_track._make_tex_resolver(
+                {"asfalto_4.dds", "my_flag00.dds"},
+                {"asfalto_4": "ASFALTO_4.DDS"},
+                renamed_maps={"asfalto 4.dds": "ASFALTO_4.DDS"},
+            )
+            self.assertEqual(res("ASFALTO 4.DDS"), "ASFALTO_4.DDS")
+            self.assertEqual(res("ASFALTO 4.TGA"), "ASFALTO_4.DDS")
+            self.assertEqual(res("MY FLAG.DDS"), "MY_FLAG.DDS")
+
+            tdf = os.path.join(tmp, "Test.tdf")
+            with open(tdf, "w", encoding="utf-8") as f:
+                f.write("[FEEDBACK]\nDry=1.05\nWet=0.88\nMaterials=roada,road\n")
+            gdb = os.path.join(tmp, "Test.gdb")
+            with open(gdb, "w", encoding="utf-8") as f:
+                f.write(
+                    "Test\n{\n  TrackName = My Test\n  NorthDirection = 123\n"
+                    "  DayAmbientRGB = (110,120,130)\n  Qualify Laptime = 72.5\n}\n"
+                )
+            used_venues = set()
+            out_gdb = rf1_track.build_gtr2_gdb(
+                gdb, "TestVenue", "Test", tdf_path=tdf,
+                used_venue_names=used_venues, max_vehicles=24,
+            )
+            self.assertIn("DayAmbientColour = (110,120,130)", out_gdb)
+            self.assertIn("NorthDir = 123", out_gdb)
+            self.assertIn("RoadDryGrip = 1.050", out_gdb)
+            self.assertIn("VenueName = My Test", out_gdb)
+            self.assertIn("Max Vehicles = 24", out_gdb)
+            # Second layout sharing the same TrackName/VenueName gets a distinct VenueName.
+            out_gdb2 = rf1_track.build_gtr2_gdb(
+                gdb, "TestVenue", "TestWet", tdf_path=tdf,
+                used_venue_names=used_venues,
+            )
+            self.assertNotIn("VenueName = My Test\n", out_gdb2)
+
+            # Multi-layout IDs & VenueNames avoid shared 4-char prefixes and prefix collisions.
+            g1 = os.path.join(tmp, "MFinthen_DTM.gdb")
+            g2 = os.path.join(tmp, "MFinthen_DTMwet.gdb")
+            with open(g1, "w", encoding="utf-8") as f:
+                f.write("MFinthen_DTM\n{\n  TrackName = Mainz-Finthen DTM\n  VenueName = Mainz-Finthen\n}\n")
+            with open(g2, "w", encoding="utf-8") as f:
+                f.write("MFinthen_DTMwet\n{\n  TrackName = Mainz-Finthen DTM wet\n  VenueName = Mainz-Finthen\n}\n")
+            lays = [
+                {"name": "MFinthen_DTM", "gdb": g1},
+                {"name": "MFinthen_DTMwet", "gdb": g2},
+            ]
+            lids = rf1_track.assign_rf1_layout_ids(lays)
+            self.assertNotEqual(lids["MFinthen_DTM"][:4].lower(), lids["MFinthen_DTMwet"][:4].lower())
+            self.assertFalse(lids["MFinthen_DTMwet"].lower().startswith(lids["MFinthen_DTM"].lower()))
+            vnames = rf1_track.assign_rf1_display_names(lays, "Mainz-Finthen")
+            self.assertFalse(vnames["MFinthen_DTMwet"].lower().startswith(vnames["MFinthen_DTM"].lower()))
+
+            # AIW garagespots > 3 is clamped to actual per-team GarPos count (<= 3).
+            aiw_in = os.path.join(tmp, "in.AIW")
+            aiw_out = os.path.join(tmp, "out.AIW")
+            with open(aiw_in, "w", encoding="utf-8") as f:
+                f.write(
+                    "[Features]\nstartinggrid=104\npitspots=52\ngaragespots=30\n"
+                    "[GRID]\nGridIndex=0\nGridIndex=1\n"
+                    "[PITS]\nTeamIndex=0\nGarPos=(0,0,0,0)\nGarPos=(1,0,0,0)\nGarPos=(2,0,0,0)\n"
+                )
+            aiw_stats = rf1_track.sanitize_rf1_aiw(aiw_in, aiw_out)
+            self.assertTrue(aiw_stats["clamped_garagespots"])
+            self.assertEqual(aiw_stats["garage_spots"], 3)
+            self.assertEqual(aiw_stats["grid_spots"], 2)
+            with open(aiw_out, encoding="utf-8") as f:
+                self.assertIn("garagespots=3", f.read())
 
 
 if __name__ == "__main__":

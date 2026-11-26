@@ -60,6 +60,7 @@ HIDDEN_IMPORTS = (
     "mesh_coarsen",
     "numpy",
     "parallel",
+    "rf1_track",
     "road_smooth",
     "steam_paths",
     "track_zip",

@@ -23,6 +23,7 @@ import configparser
 import math
 import os
 import re
+import shutil
 import sys
 
 STEAM_DEFAULT = r"C:\Program Files (x86)\Steam"
@@ -31,6 +32,9 @@ DEFAULT_GTR2_CANDIDATES = (
     r"D:\Games\GTR2\GTR2_HQ_PnG3",
     r"C:\GTR2",
     r"D:\GTR2",
+)
+DEFAULT_MASUNPACK_CANDIDATES = (
+    r"D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\masunpack.exe",
 )
 INI_NAME = "ac2gtr2.ini"
 DEFAULT_TEXTURE_SCALE = 0.5
@@ -176,8 +180,22 @@ APP_DIR = app_dir()
 BUNDLED_BLENDER = os.path.join(APP_DIR, "tools", "blender", "blender.exe")
 BUNDLED_BLENDER_STAGE = os.path.join(APP_DIR, "tools", "blender_scripts", "blender_stage.py")
 BUNDLED_TEXCONV = os.path.join(APP_DIR, "tools", "texconv", "texconv.exe")
+BUNDLED_MASUNPACK = os.path.join(APP_DIR, "tools", "rfactortools", "masunpack.exe")
 BUNDLED_AC_DIR = os.path.join(APP_DIR, "data", "ac")
 BUNDLED_GTR2_DIR = os.path.join(APP_DIR, "data", "gtr2")
+
+
+def find_masunpack():
+    """Locate masunpack.exe (bundled, Tools folder, or PATH)."""
+    if os.path.isfile(BUNDLED_MASUNPACK):
+        return BUNDLED_MASUNPACK
+    for cand in DEFAULT_MASUNPACK_CANDIDATES:
+        if os.path.isfile(cand):
+            return cand
+    found = shutil.which("masunpack")
+    if found:
+        return found
+    return DEFAULT_MASUNPACK_CANDIDATES[0]
 
 IS_STANDALONE = bool(
     getattr(sys, "frozen", False)
@@ -205,6 +223,7 @@ TEXCONV = (
     or (BUNDLED_TEXCONV if os.path.isfile(BUNDLED_TEXCONV)
         else os.path.join(RF2_DIR, "Support", "Tools", "MapConverter", "texconv.exe"))
 )
+MASUNPACK = os.environ.get("AC2GTR2_MASUNPACK") or find_masunpack()
 BLENDER = (
     os.environ.get("AC2GTR2_BLENDER")
     or (BUNDLED_BLENDER if os.path.isfile(BUNDLED_BLENDER) else DEFAULT_BLENDER)

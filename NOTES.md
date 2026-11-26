@@ -128,3 +128,38 @@ Measured across stock GTR2 tracks (`Monza`, `Barcelona`, `Spa`, `Bahrain`,
      `DXT1`/`DXT3`/`DXT5` textures directly on their RGB565 endpoints across all
      mipmaps (preserving DXT3/DXT5 alpha blocks, DXT1 opaque vs 1-bit alpha
      semantics, and excluding bump/specular/helper textures).
+
+## rFactor 1 input tracks (`rf1_track.py`, `gmt_gtr2.py`)
+
+- Input type (`ac` vs `rf1`) is auto-detected by `rf1_track.detect_track_type`
+  (and inside `.zip` archives by `track_zip.track_folders`).
+- `[track] track_shadows` (`compact` / `off` / `full`, overridable via
+  `--track-shadows`) applies to rFactor 1 `.scn` -> `.trk` conversion (with
+  `Dynamic, Texture` casters always stripped; `compact` caps `MaxShadowRange`
+  to `200 m`, keeps `ShadowReceiver=True` only on rendered `HATTarget=True`
+  surfaces, strips `Texture` casters, and keeps compact `Static, Solid` casters
+  up to `60 m` / `8000` tris at `32`/`64`; `off` strips all track casters while
+  preserving car shadows on `HATTarget=True` surfaces). All other AC-only
+  conversion options (`texture_scale`, `road_smoothness`, `mesh_coarsening`,
+  `strip_unused_gmt_data`, `track_brightness`) are ignored for rFactor 1 inputs.
+- rFactor 1 `.mas` archives are unpacked using `masunpack.exe`
+  (`D:\Mods\Automobilista\Tools\rfactortools-0.3.1.win32\masunpack.exe`,
+  configurable via `--masunpack` / `AC2GTR2_MASUNPACK`).
+- rFactor 1 GMT v2.00 binaries share GTR2 v2.10's vertex/UV/tangent/triangle
+  and 3-level material/animated/BIK texture formats, differing in the header
+  (no 16-byte magic at `0x08`, `counts` at `0x174`), 132-byte mesh descriptors
+  (vs 108-byte), and 32-byte `FaceData` without `plane_d` (vs 36-byte).
+- `gmt_gtr2.convert_rf1_to_gtr2()` converts v2.00 → v2.10 cleanly (reading
+  each rF1 mesh's material index from offset `+0x38` of the 132-byte mesh
+  descriptor), maps rF1-only shaders missing from GTR2's `GFX.GTR`
+  (`L2USEVERTEXONLY` → `L2USEVERTEXPIXEL`, `L0/L1/L2CMAPADDT0*` →
+  `L0/L1/L2CMAPT0*`, `*LERPT1*VERTEXALPHA` → stage-compatible `L*DIFFUSET0*`
+  shaders), appends the two GTR2 `MATH` pseudo-texture stages required by
+  `L2BUMPSPECMAPT0` (3 → 5) and `L2BUMPSPECT0` (2 → 4), remaps rF1-only `.tdf`
+  surface prefixes (`rdax`/`rdta`/`rdcp`/`rged`/`stick`, `grxs`, `dstg`/`gtrp`,
+  `twal`, `cem`/`wall`/`safer`) to GTR2 `specialfx.tec` prefixes, and resolves
+  stem mismatches (`.tga`/`.bmp` → `.dds`).
+- Multi-layout rF1 venues (e.g. `Mainz-Finthen` with `MFinthen_DTM` and
+  `MFinthen_DTMwet`) convert all layouts into one GTR2 location when `--layout`
+  is omitted, isolating colliding per-layout overrides into `gmt_<layout>/` and
+  `maps_<layout>/`.

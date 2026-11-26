@@ -253,6 +253,8 @@ def main():
                     help="the assettocorsa folder, if Steam does not list it")
     ap.add_argument("--texconv", default=None,
                     help="path to texconv.exe (defaults to bundled copy or rFactor 2)")
+    ap.add_argument("--masunpack", default=None,
+                    help="path to masunpack.exe for rFactor 1 .mas archives")
     args = ap.parse_args()
 
     if args.gtr2:
@@ -261,10 +263,59 @@ def main():
         os.environ["AC2GTR2_AC_DIR"] = os.path.abspath(args.ac)
     if args.texconv:
         os.environ["AC2GTR2_TEXCONV"] = os.path.abspath(args.texconv)
+    if args.masunpack:
+        os.environ["AC2GTR2_MASUNPACK"] = os.path.abspath(args.masunpack)
     if args.blender:
         os.environ["AC2GTR2_BLENDER"] = os.path.abspath(args.blender)
 
     import steam_paths
+    import rf1_track
+    import track_zip
+
+    raw_track_dir = os.path.abspath(args.track_dir)
+    if track_zip.is_zip(raw_track_dir):
+        raw_track_dir = track_zip.extract(raw_track_dir)
+    args.track_dir = raw_track_dir
+
+    if args.install is None and steam_paths.IS_STANDALONE:
+        args.install = "auto"
+    if args.install == "auto":
+        args.install = steam_paths.INSTALL_LOCATIONS
+        if steam_paths.IS_STANDALONE:
+            os.makedirs(args.install, exist_ok=True)
+    elif args.install:
+        args.install = os.path.abspath(args.install)
+
+    track_type = rf1_track.detect_track_type(args.track_dir)
+    if track_type == "rf1":
+        try:
+            config = steam_paths.load_config()
+        except ValueError as exc:
+            raise SystemExit("config error: %s" % exc)
+        if args.track_shadows is None:
+            args.track_shadows = config["track_shadows"]
+        else:
+            try:
+                args.track_shadows = steam_paths.validate_track_shadows(args.track_shadows)
+            except ValueError as exc:
+                raise SystemExit("--track-shadows: %s" % exc)
+        import check_setup
+        if not check_setup.check(args.track_dir, args.layout, None,
+                                 args.install, need_blender=False,
+                                 track_shadows=args.track_shadows,
+                                 track_type="rf1"):
+            raise SystemExit(1)
+        rf1_track.convert_rf1_track(
+            args.track_dir,
+            layout=args.layout,
+            install=args.install,
+            masunpack=steam_paths.MASUNPACK,
+            texconv=steam_paths.TEXCONV,
+            gtr2_dir=steam_paths.GTR2_DIR,
+            jobs=args.jobs,
+            track_shadows=args.track_shadows,
+        )
+        return
 
     try:
         config = steam_paths.load_config()
@@ -308,20 +359,6 @@ def main():
 
     if not args.blender:
         args.blender = steam_paths.BLENDER
-
-    if args.install is None and steam_paths.IS_STANDALONE:
-        args.install = "auto"
-    if args.install == "auto":
-        args.install = steam_paths.INSTALL_LOCATIONS
-        if steam_paths.IS_STANDALONE:
-            os.makedirs(args.install, exist_ok=True)
-    elif args.install:
-        args.install = os.path.abspath(args.install)
-
-    args.track_dir = os.path.abspath(args.track_dir)
-    import track_zip
-    if track_zip.is_zip(args.track_dir):
-        args.track_dir = track_zip.extract(args.track_dir)
 
     track = os.path.basename(os.path.abspath(args.track_dir).rstrip("\\/"))
     if args.layout:

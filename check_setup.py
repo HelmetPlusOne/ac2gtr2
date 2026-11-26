@@ -46,11 +46,15 @@ class Report:
 
 
 def layouts(track_dir):
+    import rf1_track
+    if rf1_track.detect_track_type(track_dir) == "rf1":
+        return rf1_track.rf1_layout_names(track_dir)
     return sorted(f[len("models_"):-len(".ini")] for f in os.listdir(track_dir)
                   if f.lower().startswith("models_") and f.lower().endswith(".ini"))
 
 
 def check_track(rep, track_dir, layout):
+    import rf1_track
     if os.path.isfile(track_dir):
         ext = os.path.splitext(track_dir)[1].lower()
         if ext in (".rar", ".7z"):
@@ -64,12 +68,27 @@ def check_track(rep, track_dir, layout):
         rep.problem("track folder not found: %s" % track_dir)
         return
     name = os.path.basename(os.path.normpath(track_dir))
-    if not any(f.lower().endswith(".kn5") for f in os.listdir(track_dir)):
-        rep.problem("no .kn5 model files in %s" % track_dir,
-                    "Give the track's own folder, e.g. "
-                    "...\\assettocorsa\\content\\tracks\\ks_silverstone")
+    ttype = rf1_track.detect_track_type(track_dir)
+    if ttype == "rf1":
+        have = rf1_track.rf1_layout_names(track_dir)
+        if layout:
+            matched = [h for h in have if h.casefold() == layout.casefold()]
+            if not matched:
+                rep.problem("rFactor 1 track %s has no layout called %r" % (name, layout),
+                            "Its layouts: %s" % (", ".join(have) or "none"))
+                return
+            rep.ok("rFactor 1 track %s, layout %s" % (name, matched[0]))
+        else:
+            rep.ok("rFactor 1 track %s (%d layout%s: %s)"
+                   % (name, len(have), "" if len(have) == 1 else "s", ", ".join(have)))
         return
-    have = layouts(track_dir)
+    if not any(f.lower().endswith(".kn5") for f in os.listdir(track_dir)):
+        rep.problem("no Assetto Corsa (.kn5) or rFactor 1 (.scn + .gdb) track found in %s" % track_dir,
+                    "Give an AC track folder (containing .kn5) or an rFactor 1 track folder "
+                    "(containing .scn + .gdb layouts).")
+        return
+    have = sorted(f[len("models_"):-len(".ini")] for f in os.listdir(track_dir)
+                  if f.lower().startswith("models_") and f.lower().endswith(".ini"))
     if layout:
         if layout not in have:
             rep.problem("track %s has no layout called %r" % (name, layout),
@@ -128,11 +147,16 @@ def check(track_dir=None, layout=None, blender=None, install=None,
           need_blender=True, texture_scale=None, texture_scale_min_size=None,
           road_smoothness=None, mesh_coarsening=None,
           strip_unused_gmt_data=None, track_shadows=None,
-          track_brightness=None):
+          track_brightness=None, track_type=None):
     """Print one line per check; True when nothing is missing."""
+    import rf1_track
     import steam_paths
     rep = Report()
     print("checking setup")
+
+    if track_type is None and track_dir and os.path.isdir(track_dir):
+        track_type = rf1_track.detect_track_type(track_dir)
+    is_rf1 = (track_type == "rf1")
 
     try:
         cfg = steam_paths.load_config()
@@ -140,15 +164,23 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         rep.problem("config error: %s" % exc)
         cfg = None
 
-    if cfg is not None:
-        def _fmt(key, cli_val):
-            cfg_val = cfg[key]
-            src = cfg.get(key + "_source", "default")
-            if cli_val is not None and cli_val != cfg_val:
-                return "%s=%s [from CLI, %s=%s]" % (key, cli_val, src, cfg_val)
-            tag = "from ini" if src == "ini" else "default"
-            return "%s=%s [%s]" % (key, cfg_val if cli_val is None else cli_val, tag)
+    def _fmt(key, cli_val):
+        cfg_val = cfg[key]
+        src = cfg.get(key + "_source", "default")
+        if cli_val is not None and cli_val != cfg_val:
+            return "%s=%s [from CLI, %s=%s]" % (key, cli_val, src, cfg_val)
+        tag = "from ini" if src == "ini" else "default"
+        return "%s=%s [%s]" % (key, cfg_val if cli_val is None else cli_val, tag)
 
+    if is_rf1:
+        rep.ok("input type     rFactor 1 (track_shadows enabled; other AC options disabled/ignored)")
+        if cfg is not None:
+            summary = _fmt("track_shadows", track_shadows)
+            if cfg["exists"]:
+                rep.ok("config         %s (%s)" % (cfg["path"], summary))
+            else:
+                rep.note("config         %s not found (%s)" % (cfg["path"], summary))
+    elif cfg is not None:
         active_smoothness = (
             cfg["road_smoothness"] if road_smoothness is None else road_smoothness
         )
@@ -198,13 +230,14 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         rep.problem("NumPy is not installed for this Python (%s)" % sys.executable,
                     "Run:  python -m pip install numpy")
 
-    surfaces = os.path.join(steam_paths.AC_DIR, "system", "data", "surfaces.ini")
-    if os.path.exists(surfaces):
-        rep.ok("Assetto Corsa  %s" % steam_paths.AC_DIR)
-    else:
-        rep.problem("Assetto Corsa not found (no %s)" % surfaces,
-                    "If it is installed somewhere Steam does not list, pass "
-                    "--ac \"<assettocorsa folder>\"")
+    if not is_rf1:
+        surfaces = os.path.join(steam_paths.AC_DIR, "system", "data", "surfaces.ini")
+        if os.path.exists(surfaces):
+            rep.ok("Assetto Corsa  %s" % steam_paths.AC_DIR)
+        else:
+            rep.problem("Assetto Corsa not found (no %s)" % surfaces,
+                        "If it is installed somewhere Steam does not list, pass "
+                        "--ac \"<assettocorsa folder>\"")
 
     if not os.path.isdir(steam_paths.GTR2_DIR):
         rep.problem("GTR2 not found (looked for %s)" % steam_paths.GTR2_DIR,
@@ -222,6 +255,13 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         rep.problem("texconv.exe not found at %s" % steam_paths.TEXCONV,
                     "Install DirectXTex texconv.exe or pass --texconv \"<path>\"")
 
+    if is_rf1:
+        if os.path.isfile(steam_paths.MASUNPACK):
+            rep.ok("masunpack.exe  %s" % steam_paths.MASUNPACK)
+        else:
+            rep.problem("masunpack.exe not found at %s" % steam_paths.MASUNPACK,
+                        "Pass --masunpack \"<path to masunpack.exe>\" or set AC2GTR2_MASUNPACK")
+
     if install:
         if os.path.isdir(install):
             rep.ok("install into   %s" % install)
@@ -231,7 +271,7 @@ def check(track_dir=None, layout=None, blender=None, install=None,
     if track_dir:
         check_track(rep, os.path.abspath(track_dir), layout)
 
-    if need_blender:
+    if need_blender and not is_rf1:
         check_blender(rep, blender)
 
     free = shutil.disk_usage(steam_paths.APP_DIR).free / 1e9
@@ -254,6 +294,7 @@ def main():
     ap.add_argument("--gtr2")
     ap.add_argument("--ac")
     ap.add_argument("--texconv")
+    ap.add_argument("--masunpack")
     args = ap.parse_args()
     if args.gtr2:
         os.environ["AC2GTR2_GAME_DIR"] = os.path.abspath(args.gtr2)
@@ -261,6 +302,8 @@ def main():
         os.environ["AC2GTR2_AC_DIR"] = os.path.abspath(args.ac)
     if args.texconv:
         os.environ["AC2GTR2_TEXCONV"] = os.path.abspath(args.texconv)
+    if args.masunpack:
+        os.environ["AC2GTR2_MASUNPACK"] = os.path.abspath(args.masunpack)
     import steam_paths
     if not args.blender:
         args.blender = steam_paths.BLENDER

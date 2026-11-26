@@ -36,6 +36,7 @@ STAGES = {
     "make_aiw": "make_aiw",
     "make_cam": "make_cam",
     "finalize_track": "finalize_track",
+    "rf1_track": "rf1_track",
     "check_setup": "check_setup",
     "verify_install": "verify_install",
     "track_zip": "track_zip",
@@ -122,24 +123,28 @@ def _dispatch(module_name, prog_name, args):
 def _prompt_layout(track_dir):
     """If track_dir has multiple layouts, prompt interactively when stdin is a TTY."""
     import check_setup
+    import rf1_track
 
     if not os.path.isdir(track_dir):
         return None
+    ttype = rf1_track.detect_track_type(track_dir)
     available = check_setup.layouts(track_dir)
-    if not available:
+    if not available or (ttype == "rf1" and len(available) <= 1):
         return None
     if not (sys.stdin and sys.stdin.isatty()):
         return None
 
     has_default = (
-        os.path.exists(os.path.join(track_dir, "models.ini"))
+        ttype == "rf1"
+        or os.path.exists(os.path.join(track_dir, "models.ini"))
         or os.path.isdir(os.path.join(track_dir, "ai"))
     )
     print("\nTrack '%s' has multiple layouts:" % os.path.basename(os.path.normpath(track_dir)))
     for idx, name in enumerate(available, 1):
         print("  %d. %s" % (idx, name))
+    default_label = "all layouts" if ttype == "rf1" else "default"
     prompt = (
-        "Choose layout (name or number, Enter for default): "
+        "Choose layout (name or number, Enter for %s): " % default_label
         if has_default
         else "Choose layout (name or number): "
     )

@@ -28,12 +28,15 @@ GTR2_MAGIC_OFFSET = 0x008
 RF2_MAGIC_OFFSET = 0x1BC
 
 GTR2_HEADER_SIZE = 0x214  # 532 bytes; MeshOffset = 0x210 (relative to byte 4)
+RF1_HEADER_MIN_SIZE = 0x2E4  # 740 bytes minimum; rF1 GMT v2.00 has no header magic
 RF2_HEADER_SIZE = 0x378   # 888 bytes; MeshOffset = 0x374 (relative to byte 4)
 
 GTR2_GMT_FLAGS = 0x00000020
 GTR2_MESH_SIZE = 108
+RF1_MESH_SIZE = 132
 RF2_MESH_SIZE = 156
 
+RF1_FACE_SIZE = 32
 RF2_FACE_SIZE = 32
 GTR2_FACE_SIZE = 36
 NORMAL_SIZE = 16
@@ -53,6 +56,7 @@ RF2_TEXTURE_SIZE = 180
 MESH_FLAG_TANGENTS = 0x00000004
 MAT_FLAG_RF2_CARBODY = 0x00002000
 TEX_FLAG_COLOR_KEY = 0x00000080
+TEX_FLAG_BINK = 0x00040000
 
 DEFAULT_NORMAL_QUANT = 500.0
 MAX_COARSEN_NORMAL_DEG = 8.0
@@ -92,6 +96,49 @@ def is_rf2_gmt(data):
     return (len(data) >= RF2_MAGIC_OFFSET + len(RF2_GMT_MAGIC)
             and data[RF2_MAGIC_OFFSET:RF2_MAGIC_OFFSET + len(RF2_GMT_MAGIC)]
             == RF2_GMT_MAGIC)
+
+
+def tex_record_size(data, pos):
+    """Exact byte length of one GTR2 / rF1 GMT texture entry starting at ``pos``.
+
+    Static textures occupy 172 bytes; Bink movie textures (flag 0x40000) occupy
+    180 bytes; animated textures (anim_frames > 1) embed a uint32 frame sequence
+    of length ``seq_len`` plus 12 bytes of animation metadata (172 + 4*seq_len + 12).
+    """
+    if pos + 80 > len(data):
+        return GTR2_TEXTURE_SIZE
+    flags = struct.unpack_from("<I", data, pos + 64)[0]
+    anim_frames = struct.unpack_from("<I", data, pos + 72)[0]
+    if anim_frames > 1:
+        seq_len = struct.unpack_from("<I", data, pos + 76)[0]
+        return GTR2_TEXTURE_SIZE + 4 * seq_len + 12
+    if flags & TEX_FLAG_BINK:
+        return GTR2_TEXTURE_SIZE + 8
+    return GTR2_TEXTURE_SIZE
+
+
+def is_rf1_gmt(data):
+    """Return True when raw GMT bytes match rFactor 1 gMotor 2.0 (v2.00) layout."""
+    if len(data) < RF1_HEADER_MIN_SIZE or is_gtr2_gmt(data) or is_rf2_gmt(data):
+        return False
+    mat_off = struct.unpack_from("<I", data, 0)[0] + 4
+    if mat_off < RF1_HEADER_MIN_SIZE or mat_off + 4 > len(data):
+        return False
+    nmesh, moff_r, nface, foff_r, nnorm, noff_r, _bcnt, _boff_r = struct.unpack_from(
+        "<8I", data, 0x174
+    )
+    moff = moff_r + 4
+    foff = foff_r + 4
+    noff = noff_r + 4
+    if moff < RF1_HEADER_MIN_SIZE:
+        return False
+    if moff + nmesh * RF1_MESH_SIZE > mat_off:
+        return False
+    if nface and (foff < moff or foff + nface * RF1_FACE_SIZE > mat_off):
+        return False
+    if nnorm and (noff < foff or noff + nnorm * NORMAL_SIZE > mat_off):
+        return False
+    return True
 
 
 def _pad_ascii(text, size):
@@ -711,12 +758,15 @@ def collect_diffuse_textures(gmt_dir):
             pos += 4
             tex_names = []
             for _ in range(ntex):
-                if pos + GTR2_TEXTURE_SIZE > len(b):
+                if pos + 80 > len(b):
+                    break
+                sz = tex_record_size(b, pos)
+                if pos + sz > len(b):
                     break
                 tname = b[pos:pos + 64].split(b"\x00", 1)[0].decode(
                     "ascii", errors="replace").strip().lower()
                 tex_names.append(tname)
-                pos += GTR2_TEXTURE_SIZE
+                pos += sz
             cursor = 0
             for sh, tcnt in levels:
                 slice_tex = tex_names[cursor:cursor + tcnt]
@@ -1095,15 +1145,505 @@ def make_quad_gtr2_gmt(name, corners, texture="_invisible.dds"):
     return bytes(out)
 
 
+# rF1 .tdf surface prefixes not present in GTR2's GameData\Locations\specialfx.tec,
+# mapped to the closest GTR2 specialfx.tec prefix so roads/walls/grass keep proper grip.
+_GTR2_SPECIALFX_PREFIXES = (
+    "road", "conc", "lgroad", "b1road", "b2road", "b3road", "marbles", "gbrm",
+    "gras", "logo", "fldgrass", "rdgrass",
+    "grv", "sand", "sber", "dirt", "grav", "gber", "bsand",
+    "brick", "rmbl", "rmbbl", "rdgreen", "drain",
+    "twall", "cema", "cwal", "cmwl", "grdr",
+)
+
+_RF1_SURFACE_PREFIX_MAP = (
+    ("rdax", "road_"),
+    ("rdta", "road_"),
+    ("rdcp", "road_"),
+    ("rged", "road_"),
+    ("stick", "road_"),
+    ("grxs", "gras_"),
+    ("dstg", "grvl_"),
+    ("gtrp", "grvl_"),
+    ("twal", "twall_"),
+    ("cem", "cwal_"),
+    ("wall", "cwal_"),
+    ("safer", "cwal_"),
+)
+
+
+def _remap_rf1_surface_name(name):
+    """Ensure rF1 .tdf surface material prefixes match GTR2's specialfx.tec."""
+    low = name.lower()
+    if any(low.startswith(p) for p in _GTR2_SPECIALFX_PREFIXES):
+        return name
+    for rf1_pre, gtr2_pre in _RF1_SURFACE_PREFIX_MAP:
+        if low.startswith(rf1_pre):
+            return (gtr2_pre + name)[:63]
+    return name
+
+
+def _rebuild_rf1_faces_and_normals(data, foff, nface, noff, nnorm, mesh_verts):
+    """Convert rF1 32-byte FaceData (mesh-local indices) to GTR2 36-byte FaceData."""
+    if nface == 0:
+        return b"", b"", 0
+
+    if _np is not None:
+        in_face_dt = _np.dtype([
+            ("v0", "<u2"), ("v1", "<u2"), ("v2", "<u2"), ("flg", "<u2"),
+            ("mesh", "<u4"), ("ni", "<u4"),
+            ("cx", "<f4"), ("cy", "<f4"), ("cz", "<f4"), ("radius", "<f4"),
+        ])
+        out_face_dt = _np.dtype([
+            ("v0", "<u2"), ("v1", "<u2"), ("v2", "<u2"), ("flg", "<u2"),
+            ("mesh", "<u4"), ("ni", "<u4"), ("plane_d", "<f4"),
+            ("cx", "<f4"), ("cy", "<f4"), ("cz", "<f4"), ("radius", "<f4"),
+        ])
+        norm_dt = _np.dtype([
+            ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4"), ("sg", "<u4"),
+        ])
+        in_faces = _np.frombuffer(data, dtype=in_face_dt, count=nface, offset=foff)
+        in_norms = (
+            _np.frombuffer(data, dtype=norm_dt, count=nnorm, offset=noff)
+            if nnorm > 0 else None
+        )
+        out_faces = _np.empty(nface, dtype=out_face_dt)
+        out_norms = _np.empty(nface, dtype=norm_dt)
+
+        # Build a flat lookup of mesh vertex positions indexed by (mesh_base + local_idx).
+        mesh_bases = []
+        pos_parts = []
+        running = 0
+        for mv in mesh_verts:
+            mesh_bases.append(running)
+            if len(mv):
+                vf = _np.frombuffer(mv, dtype="<f4").reshape(-1, 8)
+                pos_parts.append(vf[:, :3].astype(_np.float64, copy=False))
+                running += vf.shape[0]
+        if pos_parts:
+            all_pos = _np.concatenate(pos_parts, axis=0)
+        else:
+            all_pos = _np.zeros((0, 3), dtype=_np.float64)
+        mesh_vcnts = _np.array([len(mv) // GTR2_VERTEX_SIZE for mv in mesh_verts], dtype=_np.int64)
+        mesh_bases_arr = _np.array(mesh_bases, dtype=_np.int64)
+
+        mi = in_faces["mesh"].astype(_np.int64)
+        v0 = in_faces["v0"].astype(_np.int64)
+        v1 = in_faces["v1"].astype(_np.int64)
+        v2 = in_faces["v2"].astype(_np.int64)
+        valid_m = (mi >= 0) & (mi < len(mesh_verts))
+        smi = _np.where(valid_m, mi, 0)
+        vc = mesh_vcnts[smi] if len(mesh_verts) else _np.zeros(nface, dtype=_np.int64)
+        valid_idx = valid_m & (v0 < vc) & (v1 < vc) & (v2 < vc) & (all_pos.shape[0] > 0)
+        base = mesh_bases_arr[smi] if len(mesh_verts) else _np.zeros(nface, dtype=_np.int64)
+        g0 = _np.where(valid_idx, base + v0, 0)
+        g1 = _np.where(valid_idx, base + v1, 0)
+        g2 = _np.where(valid_idx, base + v2, 0)
+
+        if all_pos.shape[0] > 0:
+            p0 = all_pos[g0]
+            p1 = all_pos[g1]
+            p2 = all_pos[g2]
+            centroid = (p0 + p1 + p2) / 3.0
+            d0 = _np.sum((p0 - centroid) ** 2, axis=1)
+            d1 = _np.sum((p1 - centroid) ** 2, axis=1)
+            d2 = _np.sum((p2 - centroid) ** 2, axis=1)
+            radius = _np.sqrt(_np.maximum(_np.maximum(d0, d1), d2))
+            u = p1 - p0
+            v = p2 - p0
+            cross = -_np.cross(u, v)
+            lengths = _np.sqrt(_np.sum(cross * cross, axis=1))
+            good = valid_idx & (lengths > 1e-12)
+        else:
+            p0 = _np.zeros((nface, 3), dtype=_np.float64)
+            centroid = p0
+            radius = _np.zeros(nface, dtype=_np.float64)
+            cross = p0
+            lengths = _np.ones(nface, dtype=_np.float64)
+            good = _np.zeros(nface, dtype=bool)
+
+        nx = _np.zeros(nface, dtype=_np.float64)
+        ny = _np.ones(nface, dtype=_np.float64)
+        nz = _np.zeros(nface, dtype=_np.float64)
+        sg = _np.zeros(nface, dtype=_np.uint32)
+        if in_norms is not None:
+            ni = in_faces["ni"].astype(_np.int64)
+            valid_ni = ni < nnorm
+            sni = _np.where(valid_ni, ni, 0)
+            sg = _np.where(valid_ni, in_norms["sg"][sni], 0)
+            nx = _np.where(valid_ni, in_norms["nx"][sni].astype(_np.float64), nx)
+            ny = _np.where(valid_ni, in_norms["ny"][sni].astype(_np.float64), ny)
+            nz = _np.where(valid_ni, in_norms["nz"][sni].astype(_np.float64), nz)
+
+        inv_len = _np.where(good, 1.0 / _np.where(good, lengths, 1.0), 0.0)
+        nx = _np.where(good, cross[:, 0] * inv_len, nx)
+        ny = _np.where(good, cross[:, 1] * inv_len, ny)
+        nz = _np.where(good, cross[:, 2] * inv_len, nz)
+        plane_d = _np.where(
+            valid_idx,
+            nx * p0[:, 0] + ny * p0[:, 1] + nz * p0[:, 2],
+            0.0,
+        )
+        ax, ay, az = _np.abs(nx), _np.abs(ny), _np.abs(nz)
+        is_x = (ax >= ay) & (ax >= az)
+        is_y = (~is_x) & (ay >= ax) & (ay >= az)
+        flg = _np.where(
+            is_x,
+            _np.where(nx >= 0.0, 0, 1),
+            _np.where(is_y, _np.where(ny >= 0.0, 2, 3), _np.where(nz >= 0.0, 4, 5)),
+        ).astype(_np.uint16)
+
+        out_faces["v0"] = in_faces["v0"]
+        out_faces["v1"] = in_faces["v1"]
+        out_faces["v2"] = in_faces["v2"]
+        out_faces["flg"] = flg
+        out_faces["mesh"] = in_faces["mesh"]
+        out_faces["ni"] = _np.arange(nface, dtype=_np.uint32)
+        out_faces["plane_d"] = plane_d.astype(_np.float32)
+        out_faces["cx"] = _np.where(valid_idx, centroid[:, 0], in_faces["cx"]).astype(_np.float32)
+        out_faces["cy"] = _np.where(valid_idx, centroid[:, 1], in_faces["cy"]).astype(_np.float32)
+        out_faces["cz"] = _np.where(valid_idx, centroid[:, 2], in_faces["cz"]).astype(_np.float32)
+        out_faces["radius"] = _np.where(valid_idx, radius, in_faces["radius"]).astype(_np.float32)
+        out_norms["nx"] = nx.astype(_np.float32)
+        out_norms["ny"] = ny.astype(_np.float32)
+        out_norms["nz"] = nz.astype(_np.float32)
+        out_norms["sg"] = sg
+        return out_faces.tobytes(), out_norms.tobytes(), nface
+
+    out_faces = bytearray(nface * GTR2_FACE_SIZE)
+    out_norms = bytearray(nface * NORMAL_SIZE)
+    for fi in range(nface):
+        v0, v1, v2, _flg, mesh_i, ni, cx, cy, cz, radius = struct.unpack_from(
+            "<4H2I4f", data, foff + fi * RF1_FACE_SIZE
+        )
+        if ni < nnorm:
+            nx, ny, nz, sg = struct.unpack_from("<3fI", data, noff + ni * NORMAL_SIZE)
+        else:
+            nx, ny, nz, sg = 0.0, 1.0, 0.0, 0
+        plane_d = 0.0
+        if mesh_i < len(mesh_verts):
+            mv = mesh_verts[mesh_i]
+            vcnt = len(mv) // GTR2_VERTEX_SIZE
+            if v0 < vcnt and v1 < vcnt and v2 < vcnt:
+                p0 = struct.unpack_from("<3f", mv, v0 * GTR2_VERTEX_SIZE)
+                p1 = struct.unpack_from("<3f", mv, v1 * GTR2_VERTEX_SIZE)
+                p2 = struct.unpack_from("<3f", mv, v2 * GTR2_VERTEX_SIZE)
+                cx = (p0[0] + p1[0] + p2[0]) / 3.0
+                cy = (p0[1] + p1[1] + p2[1]) / 3.0
+                cz = (p0[2] + p1[2] + p2[2]) / 3.0
+                radius = max(
+                    ((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2) ** 0.5
+                    for p in (p0, p1, p2)
+                )
+                ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+                vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
+                tnx = -(uy * vz - uz * vy)
+                tny = -(uz * vx - ux * vz)
+                tnz = -(ux * vy - uy * vx)
+                length = (tnx * tnx + tny * tny + tnz * tnz) ** 0.5
+                if length > 1e-12:
+                    nx, ny, nz = tnx / length, tny / length, tnz / length
+                plane_d = nx * p0[0] + ny * p0[1] + nz * p0[2]
+        flg = _dominant_axis_flag(nx, ny, nz)
+        struct.pack_into(
+            "<4H2I5f", out_faces, fi * GTR2_FACE_SIZE,
+            v0, v1, v2, flg, mesh_i, fi, plane_d, cx, cy, cz, radius,
+        )
+        struct.pack_into("<3fI", out_norms, fi * NORMAL_SIZE, nx, ny, nz, sg)
+    return bytes(out_faces), bytes(out_norms), nface
+
+
+RF1_SHADER_MAP = {
+    "L2USEVERTEXONLY": "L2USEVERTEXPIXEL",
+    # rF1 CubeMap Add T0 variants -> GTR2 CUBEMAP.GFX exact stage-count matches
+    # (L0=3: Diffuse+Cube+Math, L1=4: Diffuse+Cube+2*Math, L2=2: Diffuse+Cube).
+    "L0CMAPADDT0": "L0CMAPT0",
+    "L1CMAPADDT0": "L1CMAPT0",
+    "L2CMAPADDT0": "L2CMAPT0",
+    "L0CMAPADDT0T1": "L0CMAPT0",
+    "L1CMAPADDT0T1": "L1CMAPT0T1",
+    "L2CMAPADDT0T1": "L2CMAPT0T1",
+    "L0CMAPADDT0XT1": "L0CMAPT0",
+    "L1CMAPADDT0XT1": "L1CMAPT0XT1",
+    "L2CMAPADDT0XT1": "L2CMAPT0XT1",
+    # rF1 vertex-alpha lerp diffuse variants -> GTR2 DIFFUSE.GFX exact stage-count matches.
+    "L0DIFFUSET0LERPT1VERTEXALPHA": "L0DIFFUSET0LERPT1",
+    "L1DIFFUSET0LERPT1VERTEXALPHA": "L1DIFFUSET0LERPT1",
+    "L2DIFFUSET0LERPT1VERTEXALPHA": "L2DIFFUSET0LERPT1",
+    "L1DIFFUSET0LERPT1T2VERTEXALPHA": "L1DIFFUSET0T1T2",
+    "L2DIFFUSET0LERPT1T2VERTEXALPHA": "L2DIFFUSET0T1T2",
+    "L1DIFFUSET0LERPT1XT2VERTEXALPHA": "L1DIFFUSET0T1XT2",
+    "L2DIFFUSET0LERPT1XT2VERTEXALPHA": "L2DIFFUSET0T1XT2",
+    "L1DIFFUSET0LERPT1T2T3VERTEXALPHA": "L1DIFFUSET0T1T2T3",
+    "L2DIFFUSET0LERPT1T2T3VERTEXALPHA": "L2DIFFUSET0T1T2T3",
+    "L1DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L1DIFFUSET0T1XT2T3",
+    "L2DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L2DIFFUSET0T1XT2T3",
+    "L1DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L1DIFFUSET0T1T2XT3",
+    "L2DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L2DIFFUSET0T1T2XT3",
+    "L1DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L1DIFFUSET0T1XT2XT3",
+    "L2DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L2DIFFUSET0T1XT2XT3",
+}
+
+
+def _remap_rf1_shader_name(name):
+    """Map rF1-only shader names to stage-compatible stock GTR2 GFX.GTR shaders."""
+    up = name.strip().upper()
+    if not up:
+        return name
+    if up in RF1_SHADER_MAP:
+        return RF1_SHADER_MAP[up]
+    if up.endswith("VERTEXALPHA"):
+        base = up[:-len("VERTEXALPHA")]
+        if "LERPT1" in base and ("T2" in base or "T3" in base):
+            base = base.replace("LERPT1", "T1", 1)
+        return base
+    return name
+
+
+def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True, tex_resolver=None):
+    """Validate and adapt an rF1 GMT material section for GTR2 v2.10.
+
+    - Maps rF1-only shaders (``L2USEVERTEXONLY``, ``L*CMAPADDT0*``,
+      ``*LERPT1*VERTEXALPHA``) to stage-compatible GTR2 ``GFX.GTR`` shaders.
+    - Appends GTR2's required ``MATH`` pseudo-texture stages on rF1 bump-spec
+      shaders (``L2BUMPSPECMAPT0`` 3 -> 5 stages, ``L2BUMPSPECT0`` 2 -> 4).
+    - Remaps rF1-only .tdf surface prefixes to GTR2 specialfx.tec prefixes.
+    - Optionally resolves texture filenames (e.g. .tga -> .dds) via ``tex_resolver``.
+    """
+    if len(mat_bytes) < 4:
+        raise RuntimeError("truncated rF1 GMT materials in %s" % label)
+    nmat = struct.unpack_from("<I", mat_bytes, 0)[0]
+    pos = 4
+    out = bytearray(struct.pack("<I", nmat))
+
+    for mi in range(nmat):
+        need = (GTR2_MAT_HEADER_SIZE + 3 * GTR2_SHADER_INFO_SIZE
+                + GTR2_MAT_POST_SHADERS_PAD + 4)
+        if pos + need > len(mat_bytes):
+            raise RuntimeError("truncated rF1 GMT material %d in %s" % (mi, label))
+
+        mhdr = bytearray(mat_bytes[pos:pos + GTR2_MAT_HEADER_SIZE])
+        if remap_surfaces:
+            mname = bytes(mhdr[:64]).split(b"\x00", 1)[0].decode("ascii", errors="replace")
+            mapped = _remap_rf1_surface_name(mname)
+            if mapped != mname:
+                mhdr[:64] = _pad_ascii(mapped, 64)
+        pos += GTR2_MAT_HEADER_SIZE
+
+        levels = []
+        for _lv in range(3):
+            sb = bytearray(mat_bytes[pos:pos + GTR2_SHADER_INFO_SIZE])
+            first_t, tcnt = struct.unpack_from("<2I", sb, 0)
+            sh = bytes(sb[8:72]).split(b"\x00", 1)[0].decode("ascii", errors="replace")
+            mapped_sh = _remap_rf1_shader_name(sh)
+            if mapped_sh != sh:
+                sb[8:72] = _pad_ascii(mapped_sh, 64)
+            levels.append([first_t, tcnt, mapped_sh.upper(), sb])
+            pos += GTR2_SHADER_INFO_SIZE
+
+        post_pad = mat_bytes[pos:pos + GTR2_MAT_POST_SHADERS_PAD]
+        pos += GTR2_MAT_POST_SHADERS_PAD
+        ntex = struct.unpack_from("<I", mat_bytes, pos)[0]
+        pos += 4
+
+        tex_records = []
+        for ti in range(ntex):
+            if pos + 80 > len(mat_bytes):
+                raise RuntimeError("truncated rF1 GMT texture %d in %s" % (ti, label))
+            sz = tex_record_size(mat_bytes, pos)
+            if pos + sz > len(mat_bytes):
+                raise RuntimeError("truncated rF1 GMT texture %d payload in %s" % (ti, label))
+            tb = bytearray(mat_bytes[pos:pos + sz])
+            if tex_resolver is not None:
+                tname = bytes(tb[:64]).split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+                if tname and tname.upper() != "MATH":
+                    resolved = tex_resolver(tname)
+                    if resolved and resolved != tname:
+                        tb[:64] = _pad_ascii(resolved, 64)
+            tex_records.append(bytes(tb))
+            pos += sz
+
+        # GTR2's L2BumpSpecMapT0 requires 5 stages ([Base, Spec, Bump, MATH, MATH])
+        # and L2BumpSpecT0 requires 4 ([Base, Bump, MATH, MATH]), while rF1 omits
+        # those two MATH pseudo-texture records. Insert them cleanly per level.
+        inserts = []  # (insert_at_old_index, [math_bytes, ...], level_idx)
+        for lv_i, (first_t, tcnt, sh_up, _sb) in enumerate(levels):
+            if sh_up == "L2BUMPSPECMAPT0" and tcnt == 3 and first_t + tcnt <= len(tex_records):
+                inserts.append((
+                    first_t + tcnt,
+                    [_make_math_tex_record(3, 0x8000, 1), _make_math_tex_record(4, 0x18, -1)],
+                    lv_i,
+                ))
+            elif sh_up == "L2BUMPSPECT0" and tcnt == 2 and first_t + tcnt <= len(tex_records):
+                inserts.append((
+                    first_t + tcnt,
+                    [_make_math_tex_record(2, 0x8000, 1), _make_math_tex_record(3, 0x18, -1)],
+                    lv_i,
+                ))
+
+        if inserts:
+            # Apply in descending index order so earlier indices stay valid.
+            for ins_at, extras, target_lv in sorted(inserts, key=lambda x: x[0], reverse=True):
+                tex_records[ins_at:ins_at] = extras
+                added = len(extras)
+                levels[target_lv][1] += added
+                for other_lv in range(3):
+                    if other_lv != target_lv and levels[other_lv][0] >= ins_at:
+                        levels[other_lv][0] += added
+            for first_t, tcnt, _sh_up, sb in levels:
+                struct.pack_into("<2I", sb, 0, first_t, tcnt)
+
+        out.extend(mhdr)
+        for _ft, _tc, _sh_up, sb in levels:
+            out.extend(sb)
+        out.extend(post_pad)
+        out.extend(struct.pack("<I", len(tex_records)))
+        for tb in tex_records:
+            out.extend(tb)
+
+    if pos != len(mat_bytes):
+        raise RuntimeError(
+            "unexpected trailing bytes (%d) after rF1 GMT materials in %s"
+            % (len(mat_bytes) - pos, label)
+        )
+    return bytes(out)
+
+
+def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=None):
+    """Convert raw rFactor 1 GMT v2.00 bytes to GTR2 GMT v2.10 bytes.
+
+    Already-converted GTR2 GMT v2.10 inputs are returned unchanged.
+    """
+    if is_gtr2_gmt(data):
+        return data
+    if not is_rf1_gmt(data):
+        raise RuntimeError("not a valid rFactor 1 GMT v2.00 file: %s" % label)
+
+    mat_off = struct.unpack_from("<I", data, 0)[0] + 4
+    flags = struct.unpack_from("<I", data, 4)[0]
+    nmesh, moff_r, nface, foff_r, nnorm, noff_r, bcnt, _boff_r = struct.unpack_from(
+        "<8I", data, 0x174
+    )
+    if bcnt != 0:
+        raise RuntimeError("rigged rF1 GMT with %d bones is not supported: %s" % (bcnt, label))
+    moff = moff_r + 4
+    foff = foff_r + 4
+    noff = noff_r + 4
+    nmat = struct.unpack_from("<I", data, mat_off)[0] if mat_off + 4 <= len(data) else 0
+
+    mesh_records = []
+    mesh_verts = []
+    for mi in range(nmesh):
+        desc_base = moff + mi * RF1_MESH_SIZE
+        u = struct.unpack_from("<10I", data, desc_base)
+        m_flags = u[0]
+        voff = u[1] + 4
+        uvoff = u[3] + 4
+        tanoff = (u[5] + 4) if u[5] else 0
+        vcnt = u[6]
+        icnt = u[8]
+        trioff = u[9] + 4
+        # In rF1's 132-byte mesh descriptor, material index lives at +0x38.
+        mat_idx = struct.unpack_from("<I", data, desc_base + 0x38)[0]
+        if nmat and mat_idx >= nmat:
+            raise RuntimeError(
+                "rF1 GMT mesh %d material index %d out of range (%d) in %s"
+                % (mi, mat_idx, nmat, label)
+            )
+
+        v_end = voff + vcnt * GTR2_VERTEX_SIZE
+        uv_end = uvoff + vcnt * GTR2_UV_SIZE
+        tri_end = trioff + icnt * 2
+        if v_end > mat_off or uv_end > mat_off or tri_end > mat_off:
+            raise RuntimeError("rF1 GMT mesh %d geometry out of bounds in %s" % (mi, label))
+        verts = data[voff:v_end]
+        uvs = data[uvoff:uv_end]
+        if tanoff:
+            tan_end = tanoff + vcnt * GTR2_TANGENT_SIZE
+            if tan_end > mat_off:
+                raise RuntimeError("rF1 GMT mesh %d tangents out of bounds in %s" % (mi, label))
+            tans = data[tanoff:tan_end]
+        else:
+            tans = None
+        tris = data[trioff:tri_end]
+        mesh_verts.append(verts)
+        mesh_records.append((m_flags, mat_idx, vcnt, icnt, verts, uvs, tans, tris))
+
+    faces_bytes, norms_bytes, out_nnorm = _rebuild_rf1_faces_and_normals(
+        data, foff, nface, noff, nnorm, mesh_verts
+    )
+    mat_bytes = _rewrite_rf1_materials(
+        data[mat_off:], label=label, remap_surfaces=remap_surfaces,
+        tex_resolver=tex_resolver,
+    )
+
+    out = bytearray(GTR2_HEADER_SIZE + nmesh * GTR2_MESH_SIZE)
+    face_off = len(out)
+    out.extend(faces_bytes)
+    norm_off = len(out)
+    out.extend(norms_bytes)
+
+    first_vert_off = len(out)
+    for mi, (m_flags, mat_idx, vcnt, icnt, verts, uvs, tans, tris) in enumerate(mesh_records):
+        v_pos = len(out)
+        if mi == 0:
+            first_vert_off = v_pos
+        out.extend(verts)
+        uv_pos = len(out)
+        out.extend(uvs)
+        if tans is not None:
+            tan_pos = len(out)
+            out.extend(tans)
+            tan_rel = tan_pos - 4
+        else:
+            tan_rel = 0
+        tri_pos = len(out)
+        out.extend(tris)
+
+        desc_pos = GTR2_HEADER_SIZE + mi * GTR2_MESH_SIZE
+        struct.pack_into(
+            "<11I", out, desc_pos,
+            m_flags, mat_idx, vcnt, v_pos - 4, 0, uv_pos - 4, tan_rel,
+            0, 0, icnt, tri_pos - 4,
+        )
+        struct.pack_into("<I", out, desc_pos + 0x5C, 0xFFFFFFFF)
+
+    out_mat_off = len(out)
+    out.extend(mat_bytes)
+
+    # Assemble 532-byte GTR2 v2.10 header from rF1 header (+0x10 shift for magic).
+    struct.pack_into("<2I", out, 0, out_mat_off - 4, flags)
+    out[GTR2_MAGIC_OFFSET:GTR2_MAGIC_OFFSET + len(GTR2_GMT_MAGIC)] = GTR2_GMT_MAGIC
+    out[0x018:0x158] = data[0x008:0x148]
+    struct.pack_into(
+        "<8I", out, 0x16C,
+        nmesh, GTR2_HEADER_SIZE - 4,
+        nface, (face_off - 4) if nface else 0,
+        out_nnorm, (norm_off - 4) if out_nnorm else 0,
+        0, first_vert_off - 4,
+    )
+    out[0x194:0x1D4] = data[0x194:0x1D4]
+    return bytes(out)
+
+
 def convert_file(path, mesh_coarsening=0.0, include_faces=True,
-                 drop_flat_tangents=False, track_brightness=0.0):
-    """Convert a GMT file on disk from rF2 v2.52 to GTR2 v2.10 in place."""
+                 drop_flat_tangents=False, track_brightness=0.0,
+                 remap_surfaces=True, tex_resolver=None):
+    """Convert a GMT file on disk (rF2 v2.52 or rF1 v2.00) to GTR2 v2.10 in place."""
     with open(path, "rb") as f:
         original = f.read()
-    converted = convert_rf2_to_gtr2(
-        original, label=path, mesh_coarsening=mesh_coarsening,
-        include_faces=include_faces, drop_flat_tangents=drop_flat_tangents,
-        track_brightness=track_brightness)
+    if is_gtr2_gmt(original):
+        return False
+    if is_rf1_gmt(original):
+        converted = convert_rf1_to_gtr2(
+            original, label=path, remap_surfaces=remap_surfaces,
+            tex_resolver=tex_resolver,
+        )
+    else:
+        converted = convert_rf2_to_gtr2(
+            original, label=path, mesh_coarsening=mesh_coarsening,
+            include_faces=include_faces, drop_flat_tangents=drop_flat_tangents,
+            track_brightness=track_brightness,
+        )
     if converted is not original:
         with open(path, "wb") as f:
             f.write(converted)
