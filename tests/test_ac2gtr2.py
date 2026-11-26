@@ -249,6 +249,42 @@ class Gtr2GmtTests(unittest.TestCase):
             with open(dds, "rb") as f:
                 self.assertEqual(f.read(), b"DDS_DATA")
 
+    def test_drops_degenerate_and_oversized_collision_faces(self):
+        # Build a 3-face rF2 GMT: face 0 valid small, face 1 zero-area degenerate,
+        # face 2 oversized (>50m in X). Both numpy and pure-Python paths must match.
+        base = bytearray(_make_rf2_gmt("1GRASS_Terrain"))
+        # Easier: build 3 single-face GMTs or patch a 3-vertex GMT directly for each case.
+        # Case A: degenerate zero-area face (collinear / collapsed vertices) is dropped.
+        degen = bytearray(_make_rf2_gmt("1ROAD_degen"))
+        (_vc, voff_r, _tc, _to, _nm, _mo, _nf, foff_r, _nn, noff_r, _bc, _bo) = struct.unpack_from("<12I", degen, 0x13C)
+        voff, noff = voff_r + 4, noff_r + 4
+        for vi, (x, y, z) in enumerate(((1.0, 2.0, 3.0), (5.0, 2.0, 3.0), (1.0, 2.0, 3.0))):
+            struct.pack_into("<3f", degen, voff + vi * gmt_gtr2.RF2_VERTEX_SIZE, x, y, z)
+        struct.pack_into("<3fI", degen, noff, 0.0, 0.0, 0.0, 0)
+
+        fast_d = gmt_gtr2.convert_rf2_to_gtr2(bytes(degen))
+        with mock.patch.object(gmt_gtr2, "_np", None):
+            pure_d = gmt_gtr2.convert_rf2_to_gtr2(bytes(degen))
+        self.assertEqual(fast_d, pure_d)
+        _nm, _mo, nface_d, _fo, nnorm_d, _no = struct.unpack_from("<6I", fast_d, 0x16C)
+        self.assertEqual((nface_d, nnorm_d), (0, 0))
+
+        # Case B: oversized triangle (80m x 40m) kept when max_face_span=None, dropped when max_face_span=50.0.
+        big = bytearray(_make_rf2_gmt("1GRASS_big"))
+        for vi, (x, y, z) in enumerate(((0.0, 0.0, 0.0), (80.0, 0.0, 0.0), (0.0, 0.0, 40.0))):
+            struct.pack_into("<3f", big, voff + vi * gmt_gtr2.RF2_VERTEX_SIZE, x, y, z)
+
+        kept = gmt_gtr2.convert_rf2_to_gtr2(bytes(big), max_face_span=None)
+        self.assertEqual(struct.unpack_from("<I", kept, 0x174)[0], 1)
+
+        fast_b = gmt_gtr2.convert_rf2_to_gtr2(bytes(big), max_face_span=50.0)
+        with mock.patch.object(gmt_gtr2, "_np", None):
+            pure_b = gmt_gtr2.convert_rf2_to_gtr2(bytes(big), max_face_span=50.0)
+        self.assertEqual(fast_b, pure_b)
+        _nm, _mo, nface_b, _fo, nnorm_b, _no = struct.unpack_from("<6I", fast_b, 0x16C)
+        self.assertEqual((nface_b, nnorm_b), (0, 0))
+        self.assertEqual(verify_install._gtr2_gmt_info(fast_b)["trailing"], 0)
+
 
 class Gtr2FinalizeTests(unittest.TestCase):
     def test_long_layout_identifier_and_instance_identifier_limits(self):
@@ -375,6 +411,82 @@ class Gtr2FinalizeTests(unittest.TestCase):
         self.assertEqual(fix_textures.target_dimensions(1024, 1024, 0.5, 1024), (512, 512))
         self.assertEqual(fix_textures.target_dimensions(512, 512, 0.5, 1024), (512, 512))
         self.assertEqual(fix_textures.target_dimensions(1024, 1024, 0.25, 1024), (512, 512))
+
+    def test_barrier_hat_target_offroad_trim_and_skyboxi_collision(self):
+        # Surface classification helpers.
+        wall_row = {"gmt": "1WALL_01.gmt", "mesh": "1WALL_01", "physical": True,
+                    "_meta": {"surface": "WALL", "rf2_material": "cwal_collision"}}
+        grass_row = {"gmt": "1GRASS_01.gmt", "mesh": "1GRASS_01", "physical": True,
+                     "_meta": {"surface": "GRASS", "rf2_material": "gras_terrain"}}
+        road_row = {"gmt": "1ROAD_01.gmt", "mesh": "1ROAD_01", "physical": True,
+                    "_meta": {"surface": "ROAD", "rf2_material": "road_asphalt"}}
+        self.assertTrue(finalize_track.is_barrier_row(wall_row))
+        self.assertFalse(finalize_track.is_offroad_terrain_row(wall_row))
+        self.assertFalse(finalize_track.is_barrier_row(grass_row))
+        self.assertTrue(finalize_track.is_offroad_terrain_row(grass_row))
+        self.assertFalse(finalize_track.is_barrier_row(road_row))
+        self.assertFalse(finalize_track.is_offroad_terrain_row(road_row))
+
+        def _rf2_with_tri(name, pts):
+            buf = bytearray(_make_rf2_gmt(name))
+            voff = struct.unpack_from("<I", buf, 0x140)[0] + 4
+            for vi, (x, y, z) in enumerate(pts):
+                struct.pack_into("<3f", buf, voff + vi * gmt_gtr2.RF2_VERTEX_SIZE, x, y, z)
+            return bytes(buf)
+
+        with tempfile.TemporaryDirectory() as root:
+            venue = "hat_guard_test"
+            layout_id = finalize_track.layout_identifier(venue)
+            out_dir = os.path.join(root, venue)
+            gmt_dir = os.path.join(out_dir, "gmt")
+            tex_dir = os.path.join(out_dir, "textures")
+            os.makedirs(gmt_dir)
+            os.makedirs(tex_dir)
+
+            small_tri = ((0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (0.0, 0.0, 4.0))
+            huge_tri = ((0.0, 0.0, 0.0), (120.0, 0.0, 0.0), (0.0, 0.0, 80.0))
+            files_spec = [
+                ("xfinish.gmt", "xfinish", True, True, small_tri),
+                ("xsector1.gmt", "xsector1", True, True, small_tri),
+                ("xsector2.gmt", "xsector2", True, True, small_tri),
+                ("1ROAD_main.gmt", "1ROAD_main", True, False, huge_tri),
+                ("1WALL_01.gmt", "1WALL_01", True, False, small_tri),
+                ("1GRASS_near.gmt", "1GRASS_near", True, False, small_tri),
+                ("1GRASS_far.gmt", "1GRASS_far", True, False, huge_tri),
+                ("skyboxi.gmt", "skyboxi", False, False, small_tri),
+            ]
+            rows = []
+            for fname, mname, phys, timing, pts in files_spec:
+                with open(os.path.join(gmt_dir, fname), "wb") as f:
+                    f.write(_rf2_with_tri(mname, pts))
+                rows.append({
+                    "gmt": fname, "mesh": mname, "physical": phys,
+                    "timing": timing, "blend": False, "radius": 10.0,
+                })
+            with open(os.path.join(gmt_dir, "exported.json"), "w") as f:
+                json.dump(rows, f)
+
+            with mock.patch.object(sys, "argv", ["finalize_track.py", out_dir]):
+                finalize_track.main()
+
+            stage = os.path.join(out_dir, "gtr2", venue)
+            with open(os.path.join(stage, layout_id + ".trk"), encoding="utf-8") as f:
+                trk = f.read()
+
+            # 1WALL keeps CollTarget=True but gets HATTarget=False.
+            self.assertIn("MeshFile=1WALL_01.gmt CollTarget=True HATTarget=False", trk)
+            # 1ROAD keeps oversized faces untouched and remains HATTarget=True.
+            self.assertIn("MeshFile=1ROAD_main.gmt CollTarget=True HATTarget=True", trk)
+            self.assertEqual(gmt_gtr2.gtr2_gmt_face_count(os.path.join(stage, "gmt", "1ROAD_main.gmt")), 1)
+            # Trackside 1GRASS_near stays HATTarget=True; far 1GRASS_far (>50m) gets emptied & disabled.
+            self.assertIn("MeshFile=1GRASS_near.gmt CollTarget=True HATTarget=True", trk)
+            self.assertEqual(gmt_gtr2.gtr2_gmt_face_count(os.path.join(stage, "gmt", "1GRASS_far.gmt")), 0)
+            self.assertIn("MeshFile=1GRASS_far.gmt CollTarget=False HATTarget=False", trk)
+            # AC skyboxi.gmt is renamed to track_skyboxi.gmt without overwriting GTR2's skyboxi.gmt.
+            self.assertTrue(os.path.isfile(os.path.join(stage, "gmt", "track_skyboxi.gmt")))
+            self.assertIn("MeshFile=track_skyboxi.gmt", trk)
+            with open(os.path.join(stage, "gmt", "skyboxi.gmt"), "rb") as f:
+                self.assertEqual(f.read(), gmt_gtr2.make_minimal_gtr2_gmt("skyboxi", "_invisible.dds"))
 
 
 class StandaloneCliAndConfigTests(unittest.TestCase):

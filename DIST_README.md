@@ -8,6 +8,10 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 
 ## Changelog
 
+### TBD
+
+- **HAT crash fix for large AC tracks**: Strips zero-area degenerate collision faces and oversized (`> 50 m`) outer-terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
+
 ### 26 Nov 2026
 
 - **Stock Car Extreme (GSCE/SCE) track support**: Auto-detects SCE tracks, decrypts GMTs/textures, remaps Reiza shaders, recovers shared `ReizaCommon` textures, and fixes AIW/material compatibility.

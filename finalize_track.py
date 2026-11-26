@@ -849,6 +849,83 @@ def stage_gtr_archives(source_dir, stage_dir, venue):
     return "\n".join("MASFile=" + name for name in names)
 
 
+RESERVED_HELPER_GMTS = frozenset({"skyboxi.gmt", "xpitin.gmt", "xpitout.gmt"})
+BARRIER_MAT_PREFIXES = ("cwal_", "twall_", "grdr_", "cmwl_", "cema_")
+BARRIER_SURFACE_KEYS = ("WALL", "TYREWALL", "GUARDRAIL", "SAFER")
+OFFROAD_MAT_PREFIXES = ("gras_", "grvl_", "dirt_", "sand_")
+OFFROAD_SURFACE_KEYS = ("GRASS", "TERRAIN", "GRAVEL", "SAND", "DIRT")
+# Oversized outer-terrain triangles (>50m) in AC 1GRASS_* meshes cause GTR2's
+# 2D XZ HTree quadtree to explode in memory and abort inside SpecialFX::Init().
+MAX_TERRAIN_HAT_SPAN = 50.0
+
+
+def _surface_stem(row):
+    meta = row.get("_meta") or {}
+    surf = (meta.get("surface") or "").strip().upper()
+    if surf:
+        return re.sub(r"[^A-Z].*$", "", surf)
+    raw = os.path.splitext(row.get("mesh") or row.get("gmt") or "")[0]
+    stripped = raw.lstrip("0123456789").upper()
+    return stripped
+
+
+def is_barrier_row(row):
+    """Return True for vertical collision barriers (walls/guardrails/tyrewalls).
+
+    Barriers stay CollTarget=True for vehicle impacts, but must be HATTarget=False
+    so they never bloat GTR2's 2D XZ HTree or sit above pit stalls as fake ground.
+    """
+    if not row.get("physical") or row.get("timing"):
+        return False
+    meta = row.get("_meta") or {}
+    rf2_mat = (meta.get("rf2_material") or "").lower()
+    if rf2_mat.startswith(BARRIER_MAT_PREFIXES):
+        return True
+    stem = _surface_stem(row)
+    return any(stem.startswith(k) for k in BARRIER_SURFACE_KEYS)
+
+
+def is_offroad_terrain_row(row):
+    """Return True for physical off-road terrain (grass/gravel/sand/dirt)."""
+    if not row.get("physical") or row.get("timing") or is_barrier_row(row):
+        return False
+    meta = row.get("_meta") or {}
+    rf2_mat = (meta.get("rf2_material") or "").lower()
+    if rf2_mat.startswith(OFFROAD_MAT_PREFIXES):
+        return True
+    stem = _surface_stem(row)
+    return any(stem.startswith(k) for k in OFFROAD_SURFACE_KEYS)
+
+
+def disable_empty_hat_instances(trk_path, empty_gmts):
+    """Clear CollTarget/HATTarget on instances whose GMT has 0 collision faces."""
+    if not empty_gmts:
+        return 0
+    empty_low = {name.lower() for name in empty_gmts}
+    with open(trk_path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    changed = 0
+
+    def _patch(match):
+        nonlocal changed
+        head, body = match.group(1), match.group(2)
+        if "Response=VEHICLE," in body:
+            return match.group(0)
+        mf = re.search(r"MeshFile=([^\s]+)", body)
+        if mf and mf.group(1).lower() in empty_low and (
+            "CollTarget=True" in body or "HATTarget=True" in body
+        ):
+            body = body.replace("CollTarget=True", "CollTarget=False")
+            body = body.replace("HATTarget=True", "HATTarget=False")
+            changed += 1
+        return head + body + "}"
+
+    updated = re.sub(r"(Instance=[^\r\n]+\r?\n\{)([^}]*)\}", _patch, text)
+    if changed:
+        write(trk_path, updated)
+    return changed
+
+
 def stage_skybox(gmt_dir):
     """Stage GTR2's required skyboxi hierarchy using stock SHARED sky domes.
 
@@ -1108,6 +1185,26 @@ def main():
     # Opaque geometry first, then transparent, biggest first.
     exported.sort(key=lambda r: (bool(r.get("blend")), -float(r.get("radius", 0.0))))
 
+    # Prevent AC meshes named skyboxi/xpitin/xpitout from overwriting GTR2's
+    # required helper GMTs staged by stage_skybox() / stage_pit_gates().
+    existing_gmts = {r["gmt"].lower() for r in exported}
+    gmt_rename_map = {}
+    for row in exported:
+        src_low = row["gmt"].lower()
+        if src_low in RESERVED_HELPER_GMTS:
+            dst = gmt_rename_map.get(src_low)
+            if dst is None:
+                cand = "track_" + row["gmt"]
+                idx = 2
+                while cand.lower() in existing_gmts or cand.lower() in RESERVED_HELPER_GMTS:
+                    stem, ext = os.path.splitext(row["gmt"])
+                    cand = "track_%s_%d%s" % (stem, idx, ext)
+                    idx += 1
+                dst = cand
+                gmt_rename_map[src_low] = dst
+                existing_gmts.add(dst.lower())
+            row["gmt"] = dst
+
     skybox = stage_skybox(gmts)
     max_shadow_range = 250.0 if args.track_shadows == "full" else 200.0
     lines = [TRK_HEADER.format(
@@ -1126,7 +1223,7 @@ def main():
         coll = "True" if row["physical"] else "False"
         if row["physical"]:
             phys += 1
-        hat = "False" if row.get("timing") else coll
+        hat = "False" if (row.get("timing") or is_barrier_row(row)) else coll
         if row.get("timing"):
             lines.append(
                 "Instance=%s\n{\n"
@@ -1209,9 +1306,12 @@ def main():
     for f in os.listdir(gmt_dir):
         if not f.lower().endswith(".gmt"):
             continue
-        if args.minimal and f.lower() not in wanted:
+        dst_name = gmt_rename_map.get(f.lower(), f)
+        if dst_name.lower() in RESERVED_HELPER_GMTS:
             continue
-        shutil.copy2(os.path.join(gmt_dir, f), gmts)
+        if args.minimal and dst_name.lower() not in wanted:
+            continue
+        shutil.copy2(os.path.join(gmt_dir, f), os.path.join(gmts, dst_name))
         n_gmt += 1
 
     n_tex = 0
@@ -1267,6 +1367,12 @@ def main():
     else:
         collidable_gmts = None
 
+    offroad_gmts = {
+        row["gmt"].lower()
+        for row in exported
+        if is_offroad_terrain_row(row)
+    }
+
     import gmt_gtr2
     converted = gmt_gtr2.convert_assets(
         stage,
@@ -1274,7 +1380,21 @@ def main():
         collidable_gmts=collidable_gmts,
         drop_flat_tangents=bool(args.strip_unused_gmt_data),
         track_brightness=args.track_brightness,
+        max_face_span_gmts=offroad_gmts,
+        max_face_span=MAX_TERRAIN_HAT_SPAN,
     )
+    if offroad_gmts:
+        empty_offroad = {
+            name for name in offroad_gmts
+            if gmt_gtr2.gtr2_gmt_face_count(os.path.join(gmts, name)) == 0
+        }
+        if empty_offroad:
+            disabled = disable_empty_hat_instances(
+                os.path.join(stage, layout + ".trk"), empty_offroad
+            )
+            if disabled:
+                print("  hat trim    disabled %d empty far-terrain HAT instances (>%.0fm tris)"
+                      % (disabled, MAX_TERRAIN_HAT_SPAN))
     if collidable_gmts is not None:
         visual_stripped = max(0, n_gmt - len(collidable_gmts - {"xpitin.gmt", "xpitout.gmt", "skyboxi.gmt"}))
         print("  converted   %d GMT files to GTR2 v2.10 (stripped unused faces on %d visual GMTs + flat-normal tangents)"

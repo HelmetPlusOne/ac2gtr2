@@ -534,16 +534,24 @@ def _dominant_axis_flag(nx, ny, nz):
     return 4 if nz >= 0.0 else 5
 
 
-def _rebuild_faces_and_normals(data, voff, vcount, foff, nface, noff, nnorm):
+def _rebuild_faces_and_normals(data, voff, vcount, foff, nface, noff, nnorm,
+                               max_face_span=None):
     """Rebuild GTR2 36-byte FaceData (flags, plane_d, centroid, radius) and NormalData.
 
     Recomputes true face normals, dominant-axis flags, plane distance
     (dot(normal, p0)), centroid, and face bounding-sphere radius directly from
     triangle vertex geometry to fix io_rf2_gmt_release's swapped-normal and
     area-vs-radius collision bugs.
+
+    Zero-area degenerate triangles (which produce zero normals and trigger
+    GTR2 ``htree.cpp`` Gaussian elimination errors) are dropped. When
+    ``max_face_span`` is set, faces whose XZ bounding box exceeds that span
+    (in meters) are also dropped to prevent oversized outer-terrain slivers
+    from exploding GTR2's 2D XZ ``HTree`` quadtree.
     """
     if nface == 0:
         return b"", b"", 0
+    span_limit = float(max_face_span) if (max_face_span is not None and max_face_span > 0.0) else None
 
     if _np is not None:
         verts_f32 = _np.frombuffer(
@@ -568,9 +576,6 @@ def _rebuild_faces_and_normals(data, voff, vcount, foff, nface, noff, nnorm):
         in_norms = (_np.frombuffer(data, dtype=norm_dt, count=nnorm, offset=noff)
                     if nnorm > 0 else _np.zeros(0, dtype=norm_dt))
 
-        out_faces = _np.zeros(nface, dtype=out_face_dt)
-        out_norms = _np.zeros(nface, dtype=norm_dt)
-
         v0 = in_faces["v0"].astype(_np.int64)
         v1 = in_faces["v1"].astype(_np.int64)
         v2 = in_faces["v2"].astype(_np.int64)
@@ -582,40 +587,45 @@ def _rebuild_faces_and_normals(data, voff, vcount, foff, nface, noff, nnorm):
         p0 = pos[sv0]
         p1 = pos[sv1]
         p2 = pos[sv2]
-        centroid = (p0 + p1 + p2) / 3.0
-        r0 = _np.linalg.norm(p0 - centroid, axis=1)
-        r1 = _np.linalg.norm(p1 - centroid, axis=1)
-        r2 = _np.linalg.norm(p2 - centroid, axis=1)
-        radius = _np.maximum(_np.maximum(r0, r1), r2)
-
         cross = -_np.cross(p1 - p0, p2 - p0)
         lengths = _np.linalg.norm(cross, axis=1)
-        good = valid_idx & (lengths > 1e-12)
+        keep = valid_idx & (lengths > 1e-6)
+        if span_limit is not None:
+            dx = (_np.maximum(_np.maximum(p0[:, 0], p1[:, 0]), p2[:, 0])
+                  - _np.minimum(_np.minimum(p0[:, 0], p1[:, 0]), p2[:, 0]))
+            dz = (_np.maximum(_np.maximum(p0[:, 2], p1[:, 2]), p2[:, 2])
+                  - _np.minimum(_np.minimum(p0[:, 2], p1[:, 2]), p2[:, 2]))
+            keep = keep & (dx <= span_limit) & (dz <= span_limit)
 
-        nx = _np.zeros(nface, dtype=_np.float64)
-        ny = _np.ones(nface, dtype=_np.float64)
-        nz = _np.zeros(nface, dtype=_np.float64)
-        sg = _np.zeros(nface, dtype=_np.uint32)
+        out_nface = int(_np.count_nonzero(keep))
+        if out_nface == 0:
+            return b"", b"", 0
 
+        kept_in = in_faces[keep]
+        kp0 = p0[keep]
+        kp1 = p1[keep]
+        kp2 = p2[keep]
+        kcross = cross[keep]
+        klen = lengths[keep]
+
+        centroid = (kp0 + kp1 + kp2) / 3.0
+        r0 = _np.linalg.norm(kp0 - centroid, axis=1)
+        r1 = _np.linalg.norm(kp1 - centroid, axis=1)
+        r2 = _np.linalg.norm(kp2 - centroid, axis=1)
+        radius = _np.maximum(_np.maximum(r0, r1), r2)
+
+        inv_len = 1.0 / klen
+        nx = kcross[:, 0] * inv_len
+        ny = kcross[:, 1] * inv_len
+        nz = kcross[:, 2] * inv_len
+        sg = _np.zeros(out_nface, dtype=_np.uint32)
         if nnorm > 0:
-            ni = in_faces["ni"].astype(_np.int64)
+            ni = kept_in["ni"].astype(_np.int64)
             valid_ni = ni < nnorm
             sni = _np.where(valid_ni, ni, 0)
             sg = _np.where(valid_ni, in_norms["sg"][sni], 0)
-            nx = _np.where(valid_ni, in_norms["nx"][sni].astype(_np.float64), nx)
-            ny = _np.where(valid_ni, in_norms["ny"][sni].astype(_np.float64), ny)
-            nz = _np.where(valid_ni, in_norms["nz"][sni].astype(_np.float64), nz)
 
-        inv_len = _np.where(good, 1.0 / _np.where(good, lengths, 1.0), 0.0)
-        nx = _np.where(good, cross[:, 0] * inv_len, nx)
-        ny = _np.where(good, cross[:, 1] * inv_len, ny)
-        nz = _np.where(good, cross[:, 2] * inv_len, nz)
-
-        plane_d = _np.where(
-            valid_idx,
-            nx * p0[:, 0] + ny * p0[:, 1] + nz * p0[:, 2],
-            0.0,
-        )
+        plane_d = nx * kp0[:, 0] + ny * kp0[:, 1] + nz * kp0[:, 2]
 
         ax, ay, az = _np.abs(nx), _np.abs(ny), _np.abs(nz)
         is_x = (ax >= ay) & (ax >= az)
@@ -626,59 +636,66 @@ def _rebuild_faces_and_normals(data, voff, vcount, foff, nface, noff, nnorm):
             _np.where(is_y, _np.where(ny >= 0.0, 2, 3), _np.where(nz >= 0.0, 4, 5)),
         ).astype(_np.uint16)
 
-        out_faces["v0"] = in_faces["v0"]
-        out_faces["v1"] = in_faces["v1"]
-        out_faces["v2"] = in_faces["v2"]
+        out_faces = _np.zeros(out_nface, dtype=out_face_dt)
+        out_norms = _np.zeros(out_nface, dtype=norm_dt)
+        out_faces["v0"] = kept_in["v0"]
+        out_faces["v1"] = kept_in["v1"]
+        out_faces["v2"] = kept_in["v2"]
         out_faces["flg"] = flg
-        out_faces["mesh"] = in_faces["mesh"]
-        out_faces["ni"] = _np.arange(nface, dtype=_np.uint32)
+        out_faces["mesh"] = kept_in["mesh"]
+        out_faces["ni"] = _np.arange(out_nface, dtype=_np.uint32)
         out_faces["plane_d"] = plane_d.astype(_np.float32)
-        out_faces["cx"] = _np.where(valid_idx, centroid[:, 0], in_faces["cx"]).astype(_np.float32)
-        out_faces["cy"] = _np.where(valid_idx, centroid[:, 1], in_faces["cy"]).astype(_np.float32)
-        out_faces["cz"] = _np.where(valid_idx, centroid[:, 2], in_faces["cz"]).astype(_np.float32)
-        out_faces["radius"] = _np.where(valid_idx, radius, in_faces["radius"]).astype(_np.float32)
+        out_faces["cx"] = centroid[:, 0].astype(_np.float32)
+        out_faces["cy"] = centroid[:, 1].astype(_np.float32)
+        out_faces["cz"] = centroid[:, 2].astype(_np.float32)
+        out_faces["radius"] = radius.astype(_np.float32)
         out_norms["nx"] = nx.astype(_np.float32)
         out_norms["ny"] = ny.astype(_np.float32)
         out_norms["nz"] = nz.astype(_np.float32)
         out_norms["sg"] = sg
-        return out_faces.tobytes(), out_norms.tobytes(), nface
+        return out_faces.tobytes(), out_norms.tobytes(), out_nface
 
-    out_faces = bytearray(nface * GTR2_FACE_SIZE)
-    out_norms = bytearray(nface * NORMAL_SIZE)
+    out_faces = bytearray()
+    out_norms = bytearray()
+    out_idx = 0
     for fi in range(nface):
         fpos = foff + fi * RF2_FACE_SIZE
-        v0, v1, v2, _flg, mesh_i, ni, cx, cy, cz, radius = struct.unpack_from(
+        v0, v1, v2, _flg, mesh_i, ni, _cx, _cy, _cz, _radius = struct.unpack_from(
             "<4H2I4f", data, fpos)
-        if ni < nnorm:
-            nx, ny, nz, sg = struct.unpack_from("<3fI", data, noff + ni * NORMAL_SIZE)
-        else:
-            nx, ny, nz, sg = 0.0, 1.0, 0.0, 0
-        plane_d = 0.0
-        if v0 < vcount and v1 < vcount and v2 < vcount:
-            p0 = struct.unpack_from("<3f", data, voff + v0 * RF2_VERTEX_SIZE)
-            p1 = struct.unpack_from("<3f", data, voff + v1 * RF2_VERTEX_SIZE)
-            p2 = struct.unpack_from("<3f", data, voff + v2 * RF2_VERTEX_SIZE)
-            cx = (p0[0] + p1[0] + p2[0]) / 3.0
-            cy = (p0[1] + p1[1] + p2[1]) / 3.0
-            cz = (p0[2] + p1[2] + p2[2]) / 3.0
-            radius = max(
-                ((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2) ** 0.5
-                for p in (p0, p1, p2)
-            )
-            ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
-            vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
-            tnx = -(uy * vz - uz * vy)
-            tny = -(uz * vx - ux * vz)
-            tnz = -(ux * vy - uy * vx)
-            length = (tnx * tnx + tny * tny + tnz * tnz) ** 0.5
-            if length > 1e-12:
-                nx, ny, nz = tnx / length, tny / length, tnz / length
-            plane_d = nx * p0[0] + ny * p0[1] + nz * p0[2]
+        if not (v0 < vcount and v1 < vcount and v2 < vcount):
+            continue
+        p0 = struct.unpack_from("<3f", data, voff + v0 * RF2_VERTEX_SIZE)
+        p1 = struct.unpack_from("<3f", data, voff + v1 * RF2_VERTEX_SIZE)
+        p2 = struct.unpack_from("<3f", data, voff + v2 * RF2_VERTEX_SIZE)
+        ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+        vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
+        tnx = -(uy * vz - uz * vy)
+        tny = -(uz * vx - ux * vz)
+        tnz = -(ux * vy - uy * vx)
+        length = (tnx * tnx + tny * tny + tnz * tnz) ** 0.5
+        if length <= 1e-6:
+            continue
+        if span_limit is not None:
+            dx = max(p0[0], p1[0], p2[0]) - min(p0[0], p1[0], p2[0])
+            dz = max(p0[2], p1[2], p2[2]) - min(p0[2], p1[2], p2[2])
+            if dx > span_limit or dz > span_limit:
+                continue
+        nx, ny, nz = tnx / length, tny / length, tnz / length
+        sg = struct.unpack_from("<I", data, noff + ni * NORMAL_SIZE + 12)[0] if ni < nnorm else 0
+        cx = (p0[0] + p1[0] + p2[0]) / 3.0
+        cy = (p0[1] + p1[1] + p2[1]) / 3.0
+        cz = (p0[2] + p1[2] + p2[2]) / 3.0
+        radius = max(
+            ((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2) ** 0.5
+            for p in (p0, p1, p2)
+        )
+        plane_d = nx * p0[0] + ny * p0[1] + nz * p0[2]
         flg = _dominant_axis_flag(nx, ny, nz)
-        struct.pack_into("<4H2I5f", out_faces, fi * GTR2_FACE_SIZE,
-                         v0, v1, v2, flg, mesh_i, fi, plane_d, cx, cy, cz, radius)
-        struct.pack_into("<3fI", out_norms, fi * NORMAL_SIZE, nx, ny, nz, sg)
-    return bytes(out_faces), bytes(out_norms), nface
+        out_faces.extend(struct.pack(
+            "<4H2I5f", v0, v1, v2, flg, mesh_i, out_idx, plane_d, cx, cy, cz, radius))
+        out_norms.extend(struct.pack("<3fI", nx, ny, nz, sg))
+        out_idx += 1
+    return bytes(out_faces), bytes(out_norms), out_idx
 
 
 def _bbox_corners(bbox_min, bbox_max):
@@ -790,7 +807,7 @@ def collect_diffuse_textures(gmt_dir):
 
 def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
                         include_faces=True, drop_flat_tangents=False,
-                        track_brightness=0.0):
+                        track_brightness=0.0, max_face_span=None):
     """Convert raw rF2 GMT v2.52 bytes to GTR2 GMT v2.10 bytes.
 
     Already-converted GTR2 GMT v2.10 inputs are returned unchanged.
@@ -798,6 +815,8 @@ def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
     collision FaceData and NormalData sections are omitted (nface=0, nnorm=0).
     When ``drop_flat_tangents`` is True, flat-normal/flat-spec ``L2BUMPSPECMAPT0``
     cutouts are downgraded to ``L2DIFFUSET0`` without UVTangents.
+    When ``max_face_span`` is set (meters), oversized collision faces whose XZ
+    span exceeds it are omitted from FaceData.
     """
     if is_gtr2_gmt(data):
         return data
@@ -916,9 +935,10 @@ def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
     out = bytearray(GTR2_HEADER_SIZE + nmesh * GTR2_MESH_SIZE)
 
     if include_faces:
-        face_bytes, norm_bytes, out_nnorm = _rebuild_faces_and_normals(
-            data, voff, vcount, foff, nface, noff, nnorm)
-        out_nface = nface
+        face_bytes, norm_bytes, out_nface = _rebuild_faces_and_normals(
+            data, voff, vcount, foff, nface, noff, nnorm,
+            max_face_span=max_face_span)
+        out_nnorm = out_nface
     else:
         face_bytes, norm_bytes, out_nface, out_nnorm = b"", b"", 0, 0
 
@@ -946,9 +966,9 @@ def convert_rf2_to_gtr2(data, label="GMT", mesh_coarsening=0.0,
             verts_bytes, uvs_bytes, tans_bytes, tris_bytes,
         ))
 
-    if include_faces:
+    if include_faces and out_nface > 0:
         face_bytes = _remap_face_vertices_local(
-            face_bytes, nface, mesh_starts, mesh_vcounts, mesh_remaps)
+            face_bytes, out_nface, mesh_starts, mesh_vcounts, mesh_remaps)
 
     face_off = len(out)
     out.extend(face_bytes)
@@ -1249,46 +1269,43 @@ def _rebuild_rf1_faces_and_normals(data, foff, nface, noff, nnorm, mesh_verts):
             p0 = all_pos[g0]
             p1 = all_pos[g1]
             p2 = all_pos[g2]
-            centroid = (p0 + p1 + p2) / 3.0
-            d0 = _np.sum((p0 - centroid) ** 2, axis=1)
-            d1 = _np.sum((p1 - centroid) ** 2, axis=1)
-            d2 = _np.sum((p2 - centroid) ** 2, axis=1)
-            radius = _np.sqrt(_np.maximum(_np.maximum(d0, d1), d2))
             u = p1 - p0
             v = p2 - p0
             cross = -_np.cross(u, v)
             lengths = _np.sqrt(_np.sum(cross * cross, axis=1))
-            good = valid_idx & (lengths > 1e-12)
+            keep = valid_idx & (lengths > 1e-6)
         else:
-            p0 = _np.zeros((nface, 3), dtype=_np.float64)
-            centroid = p0
-            radius = _np.zeros(nface, dtype=_np.float64)
-            cross = p0
-            lengths = _np.ones(nface, dtype=_np.float64)
-            good = _np.zeros(nface, dtype=bool)
+            keep = _np.zeros(nface, dtype=bool)
 
-        nx = _np.zeros(nface, dtype=_np.float64)
-        ny = _np.ones(nface, dtype=_np.float64)
-        nz = _np.zeros(nface, dtype=_np.float64)
-        sg = _np.zeros(nface, dtype=_np.uint32)
+        out_nface = int(_np.count_nonzero(keep))
+        if out_nface == 0:
+            return b"", b"", 0
+
+        kept_in = in_faces[keep]
+        kp0 = p0[keep]
+        kp1 = p1[keep]
+        kp2 = p2[keep]
+        kcross = cross[keep]
+        klen = lengths[keep]
+
+        centroid = (kp0 + kp1 + kp2) / 3.0
+        d0 = _np.sum((kp0 - centroid) ** 2, axis=1)
+        d1 = _np.sum((kp1 - centroid) ** 2, axis=1)
+        d2 = _np.sum((kp2 - centroid) ** 2, axis=1)
+        radius = _np.sqrt(_np.maximum(_np.maximum(d0, d1), d2))
+
+        inv_len = 1.0 / klen
+        nx = kcross[:, 0] * inv_len
+        ny = kcross[:, 1] * inv_len
+        nz = kcross[:, 2] * inv_len
+        sg = _np.zeros(out_nface, dtype=_np.uint32)
         if in_norms is not None:
-            ni = in_faces["ni"].astype(_np.int64)
+            ni = kept_in["ni"].astype(_np.int64)
             valid_ni = ni < nnorm
             sni = _np.where(valid_ni, ni, 0)
             sg = _np.where(valid_ni, in_norms["sg"][sni], 0)
-            nx = _np.where(valid_ni, in_norms["nx"][sni].astype(_np.float64), nx)
-            ny = _np.where(valid_ni, in_norms["ny"][sni].astype(_np.float64), ny)
-            nz = _np.where(valid_ni, in_norms["nz"][sni].astype(_np.float64), nz)
 
-        inv_len = _np.where(good, 1.0 / _np.where(good, lengths, 1.0), 0.0)
-        nx = _np.where(good, cross[:, 0] * inv_len, nx)
-        ny = _np.where(good, cross[:, 1] * inv_len, ny)
-        nz = _np.where(good, cross[:, 2] * inv_len, nz)
-        plane_d = _np.where(
-            valid_idx,
-            nx * p0[:, 0] + ny * p0[:, 1] + nz * p0[:, 2],
-            0.0,
-        )
+        plane_d = nx * kp0[:, 0] + ny * kp0[:, 1] + nz * kp0[:, 2]
         ax, ay, az = _np.abs(nx), _np.abs(ny), _np.abs(nz)
         is_x = (ax >= ay) & (ax >= az)
         is_y = (~is_x) & (ay >= ax) & (ay >= az)
@@ -1298,64 +1315,66 @@ def _rebuild_rf1_faces_and_normals(data, foff, nface, noff, nnorm, mesh_verts):
             _np.where(is_y, _np.where(ny >= 0.0, 2, 3), _np.where(nz >= 0.0, 4, 5)),
         ).astype(_np.uint16)
 
-        out_faces["v0"] = in_faces["v0"]
-        out_faces["v1"] = in_faces["v1"]
-        out_faces["v2"] = in_faces["v2"]
+        out_faces = _np.empty(out_nface, dtype=out_face_dt)
+        out_norms = _np.empty(out_nface, dtype=norm_dt)
+        out_faces["v0"] = kept_in["v0"]
+        out_faces["v1"] = kept_in["v1"]
+        out_faces["v2"] = kept_in["v2"]
         out_faces["flg"] = flg
-        out_faces["mesh"] = in_faces["mesh"]
-        out_faces["ni"] = _np.arange(nface, dtype=_np.uint32)
+        out_faces["mesh"] = kept_in["mesh"]
+        out_faces["ni"] = _np.arange(out_nface, dtype=_np.uint32)
         out_faces["plane_d"] = plane_d.astype(_np.float32)
-        out_faces["cx"] = _np.where(valid_idx, centroid[:, 0], in_faces["cx"]).astype(_np.float32)
-        out_faces["cy"] = _np.where(valid_idx, centroid[:, 1], in_faces["cy"]).astype(_np.float32)
-        out_faces["cz"] = _np.where(valid_idx, centroid[:, 2], in_faces["cz"]).astype(_np.float32)
-        out_faces["radius"] = _np.where(valid_idx, radius, in_faces["radius"]).astype(_np.float32)
+        out_faces["cx"] = centroid[:, 0].astype(_np.float32)
+        out_faces["cy"] = centroid[:, 1].astype(_np.float32)
+        out_faces["cz"] = centroid[:, 2].astype(_np.float32)
+        out_faces["radius"] = radius.astype(_np.float32)
         out_norms["nx"] = nx.astype(_np.float32)
         out_norms["ny"] = ny.astype(_np.float32)
         out_norms["nz"] = nz.astype(_np.float32)
         out_norms["sg"] = sg
-        return out_faces.tobytes(), out_norms.tobytes(), nface
+        return out_faces.tobytes(), out_norms.tobytes(), out_nface
 
-    out_faces = bytearray(nface * GTR2_FACE_SIZE)
-    out_norms = bytearray(nface * NORMAL_SIZE)
+    out_faces = bytearray()
+    out_norms = bytearray()
+    out_idx = 0
     for fi in range(nface):
-        v0, v1, v2, _flg, mesh_i, ni, cx, cy, cz, radius = struct.unpack_from(
+        v0, v1, v2, _flg, mesh_i, ni, _cx, _cy, _cz, _radius = struct.unpack_from(
             "<4H2I4f", data, foff + fi * RF1_FACE_SIZE
         )
-        if ni < nnorm:
-            nx, ny, nz, sg = struct.unpack_from("<3fI", data, noff + ni * NORMAL_SIZE)
-        else:
-            nx, ny, nz, sg = 0.0, 1.0, 0.0, 0
-        plane_d = 0.0
-        if mesh_i < len(mesh_verts):
-            mv = mesh_verts[mesh_i]
-            vcnt = len(mv) // GTR2_VERTEX_SIZE
-            if v0 < vcnt and v1 < vcnt and v2 < vcnt:
-                p0 = struct.unpack_from("<3f", mv, v0 * GTR2_VERTEX_SIZE)
-                p1 = struct.unpack_from("<3f", mv, v1 * GTR2_VERTEX_SIZE)
-                p2 = struct.unpack_from("<3f", mv, v2 * GTR2_VERTEX_SIZE)
-                cx = (p0[0] + p1[0] + p2[0]) / 3.0
-                cy = (p0[1] + p1[1] + p2[1]) / 3.0
-                cz = (p0[2] + p1[2] + p2[2]) / 3.0
-                radius = max(
-                    ((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2) ** 0.5
-                    for p in (p0, p1, p2)
-                )
-                ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
-                vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
-                tnx = -(uy * vz - uz * vy)
-                tny = -(uz * vx - ux * vz)
-                tnz = -(ux * vy - uy * vx)
-                length = (tnx * tnx + tny * tny + tnz * tnz) ** 0.5
-                if length > 1e-12:
-                    nx, ny, nz = tnx / length, tny / length, tnz / length
-                plane_d = nx * p0[0] + ny * p0[1] + nz * p0[2]
-        flg = _dominant_axis_flag(nx, ny, nz)
-        struct.pack_into(
-            "<4H2I5f", out_faces, fi * GTR2_FACE_SIZE,
-            v0, v1, v2, flg, mesh_i, fi, plane_d, cx, cy, cz, radius,
+        if mesh_i >= len(mesh_verts):
+            continue
+        mv = mesh_verts[mesh_i]
+        vcnt = len(mv) // GTR2_VERTEX_SIZE
+        if not (v0 < vcnt and v1 < vcnt and v2 < vcnt):
+            continue
+        p0 = struct.unpack_from("<3f", mv, v0 * GTR2_VERTEX_SIZE)
+        p1 = struct.unpack_from("<3f", mv, v1 * GTR2_VERTEX_SIZE)
+        p2 = struct.unpack_from("<3f", mv, v2 * GTR2_VERTEX_SIZE)
+        ux, uy, uz = p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]
+        vx, vy, vz = p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]
+        tnx = -(uy * vz - uz * vy)
+        tny = -(uz * vx - ux * vz)
+        tnz = -(ux * vy - uy * vx)
+        length = (tnx * tnx + tny * tny + tnz * tnz) ** 0.5
+        if length <= 1e-6:
+            continue
+        nx, ny, nz = tnx / length, tny / length, tnz / length
+        sg = struct.unpack_from("<I", data, noff + ni * NORMAL_SIZE + 12)[0] if ni < nnorm else 0
+        cx = (p0[0] + p1[0] + p2[0]) / 3.0
+        cy = (p0[1] + p1[1] + p2[1]) / 3.0
+        cz = (p0[2] + p1[2] + p2[2]) / 3.0
+        radius = max(
+            ((p[0] - cx) ** 2 + (p[1] - cy) ** 2 + (p[2] - cz) ** 2) ** 0.5
+            for p in (p0, p1, p2)
         )
-        struct.pack_into("<3fI", out_norms, fi * NORMAL_SIZE, nx, ny, nz, sg)
-    return bytes(out_faces), bytes(out_norms), nface
+        plane_d = nx * p0[0] + ny * p0[1] + nz * p0[2]
+        flg = _dominant_axis_flag(nx, ny, nz)
+        out_faces.extend(struct.pack(
+            "<4H2I5f", v0, v1, v2, flg, mesh_i, out_idx, plane_d, cx, cy, cz, radius,
+        ))
+        out_norms.extend(struct.pack("<3fI", nx, ny, nz, sg))
+        out_idx += 1
+    return bytes(out_faces), bytes(out_norms), out_idx
 
 
 RF1_SHADER_MAP = {
@@ -1703,9 +1722,10 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
         mesh_verts.append(verts)
         mesh_records.append([m_flags, mat_idx, vcnt, icnt, verts, uvs, uv2s, tans, tris])
 
-    faces_bytes, norms_bytes, out_nnorm = _rebuild_rf1_faces_and_normals(
+    faces_bytes, norms_bytes, out_nface = _rebuild_rf1_faces_and_normals(
         data, foff, nface, noff, nnorm, mesh_verts
     )
+    out_nnorm = out_nface
     mat_bytes, uv4_remap_mats = _rewrite_rf1_materials(
         data[mat_off:], label=label, remap_surfaces=remap_surfaces,
         tex_resolver=tex_resolver, mat_has_tangents=mat_has_tangents,
@@ -1767,7 +1787,7 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
     struct.pack_into(
         "<8I", out, 0x16C,
         nmesh, GTR2_HEADER_SIZE - 4,
-        nface, (face_off - 4) if nface else 0,
+        out_nface, (face_off - 4) if out_nface else 0,
         out_nnorm, (norm_off - 4) if out_nnorm else 0,
         0, first_vert_off - 4,
     )
@@ -1775,9 +1795,21 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
     return bytes(out)
 
 
+def gtr2_gmt_face_count(path):
+    """Return FaceData face count of a GTR2 GMT v2.10 file, or None if unreadable."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(0x18C)
+    except OSError:
+        return None
+    if len(head) < 0x18C or not is_gtr2_gmt(head):
+        return None
+    return struct.unpack_from("<I", head, 0x174)[0]
+
+
 def convert_file(path, mesh_coarsening=0.0, include_faces=True,
                  drop_flat_tangents=False, track_brightness=0.0,
-                 remap_surfaces=True, tex_resolver=None):
+                 remap_surfaces=True, tex_resolver=None, max_face_span=None):
     """Convert a GMT file on disk (rF2 v2.52 or rF1 v2.00) to GTR2 v2.10 in place."""
     with open(path, "rb") as f:
         original = f.read()
@@ -1792,7 +1824,7 @@ def convert_file(path, mesh_coarsening=0.0, include_faces=True,
         converted = convert_rf2_to_gtr2(
             original, label=path, mesh_coarsening=mesh_coarsening,
             include_faces=include_faces, drop_flat_tangents=drop_flat_tangents,
-            track_brightness=track_brightness,
+            track_brightness=track_brightness, max_face_span=max_face_span,
         )
     if converted is not original:
         with open(path, "wb") as f:
@@ -1802,7 +1834,8 @@ def convert_file(path, mesh_coarsening=0.0, include_faces=True,
 
 
 def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
-                   drop_flat_tangents=False, track_brightness=0.0):
+                   drop_flat_tangents=False, track_brightness=0.0,
+                   max_face_span_gmts=None, max_face_span=None):
     """Convert all loose GMT files under a staged GTR2 location to GMT v2.10.
 
     GTR2 uses unencrypted GMT v2.10 and DDS assets. When ``collidable_gmts``
@@ -1811,11 +1844,17 @@ def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
     converted with ``include_faces=False``. When ``drop_flat_tangents`` is
     True, flat-normal/flat-spec bump cutouts are downgraded to ``L2DIFFUSET0``
     without UVTangents. When ``track_brightness`` > 0.0, material diffuse and
-    ambient RGB levels are lifted smoothly toward 1.0.
+    ambient RGB levels are lifted smoothly toward 1.0. When
+    ``max_face_span_gmts`` and ``max_face_span`` are given, matching GMTs drop
+    oversized collision faces exceeding ``max_face_span`` meters in X or Z.
     """
     collidable = (
         {name.lower() for name in collidable_gmts}
         if collidable_gmts is not None else None
+    )
+    capped = (
+        {name.lower() for name in max_face_span_gmts}
+        if max_face_span_gmts is not None else None
     )
     files = []
     for folder, _, names in os.walk(root):
@@ -1825,9 +1864,12 @@ def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
     files.sort()
 
     for path in files:
-        include_faces = (
-            True if collidable is None
-            else os.path.basename(path).lower() in collidable
+        low = os.path.basename(path).lower()
+        include_faces = True if collidable is None else (low in collidable)
+        face_span = (
+            max_face_span
+            if (capped is not None and max_face_span and low in capped)
+            else None
         )
         convert_file(
             path,
@@ -1835,6 +1877,7 @@ def convert_assets(root, mesh_coarsening=0.0, collidable_gmts=None,
             include_faces=include_faces,
             drop_flat_tangents=drop_flat_tangents,
             track_brightness=track_brightness,
+            max_face_span=face_span,
         )
         with open(path, "rb") as f:
             head = f.read(GTR2_MAGIC_OFFSET + len(GTR2_GMT_MAGIC))
