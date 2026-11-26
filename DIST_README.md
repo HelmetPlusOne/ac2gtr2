@@ -1,6 +1,6 @@
-# Assetto Corsa / rFactor 1 to GTR2 — Standalone Track Converter
+# Assetto Corsa to GTR2 - Standalone Track Converter
 
-Standalone Windows distribution for converting Assetto Corsa (AC) and rFactor 1 (rF1) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC or rF1 track folder (or `.zip` archive) onto `ac2gtr2.exe`.
+Standalone Windows distribution for converting Assetto Corsa (AC) (and rFactor 1) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC (or rF1) track folder (or `.zip` archive) onto `ac2gtr2.exe`.
 
 Converted tracks are automatically installed into the `out\` folder next to `ac2gtr2.exe`. To play a converted track in GTR2, copy `out\<track>\` into `<GTR2>\GameData\Locations\`.
 
