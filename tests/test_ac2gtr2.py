@@ -992,6 +992,30 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
                 x_raw = f.read()
             self.assertIn(b"road_rdax_main_nc\x00", x_raw)
 
+    def test_build_dist_release_archive_and_sha256(self):
+        import datetime
+        import build_dist
+        import sha256sum
+
+        self.assertEqual(
+            os.path.basename(build_dist.release_dist_dir(r"C:\work", datetime.date(2026, 11, 26))),
+            "ac2gtr2_20261126",
+        )
+        seven_zip = build_dist.find_7z()
+        with tempfile.TemporaryDirectory() as tmp:
+            rel_dir = build_dist.release_dist_dir(tmp, datetime.date(2026, 11, 26))
+            os.makedirs(rel_dir)
+            with open(os.path.join(rel_dir, "hello.txt"), "w", encoding="utf-8") as f:
+                f.write("ac2gtr2 release test\n")
+            archive_path, checksum_path, digest = build_dist.create_release_archive(rel_dir, seven_zip)
+            self.assertTrue(os.path.isfile(archive_path))
+            self.assertTrue(os.path.isfile(checksum_path))
+            self.assertEqual(os.path.basename(archive_path), "ac2gtr2_20261126.7z")
+            self.assertEqual(os.path.basename(checksum_path), "ac2gtr2_20261126.7z.sha256.txt")
+            self.assertEqual(digest, sha256sum.sha256_file(archive_path))
+            with open(checksum_path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "%s  ac2gtr2_20261126.7z\n" % digest)
+
 
 if __name__ == "__main__":
     unittest.main()

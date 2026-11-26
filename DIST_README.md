@@ -1,26 +1,28 @@
-# Assetto Corsa to GTR2 - Standalone Track Converter
+# Assetto Corsa to GTR 2 - Standalone Track Converter
 
-Standalone Windows distribution for converting Assetto Corsa (AC), rFactor 1 (rF1), and Stock Car Extreme (GSCE/SCE) tracks into GTR2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR2, or rFactor 2 is required. Drag and drop an AC, rF1, or SCE track folder (or `.zip` archive) onto `ac2gtr2.exe`.
+Standalone Windows distribution for converting Assetto Corsa (AC), tracks into GTR 2 locations. No pre-installed Python, Blender, Assetto Corsa, GTR 2, or rFactor 2 is required. Drag and drop an AC, track folder (or `.zip` archive) onto `ac2gtr2.exe`.
 
 Converted tracks are automatically installed into the `out\` folder next to `ac2gtr2.exe`. To play a converted track in GTR2, copy `out\<track>\` into `<GTR2>\GameData\Locations\`.
 
+Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported as an input - these tracks are only re-packaged with minimal changes (no Blender run) and conversion options are not supported for them.
+
 ## Changelog
 
-### Stock Car Extreme & rFactor 1 Input Support, Track Brightness
+### 26 Nov 2026
 
-- **Automatic Stock Car Extreme (GSCE/SCE) track conversion**: Detects SCE tracks automatically (via Reiza `.scn`/`.gdb` markers or encrypted GMTs), decrypts GSCE GMT binaries and encrypted textures (such as `SKIDHARD.TGA`) via `rfactorcrypt.exe`, clears secondary `UV4..7` mesh flags while migrating bump `uv4 -> uv2`, strips unsupported GSCE/rF1 local material/texture flags (`0x00040000`/`0x00000200`/`0x00000100`) and disambiguates conflicting cross-GMT material definitions to prevent GTR2 `Material global/local mismatch` errors, remaps Reiza/GSCE custom shaders (`SIMPLEROADSHADERV2`, `ADVANCEDNONLINEDROADSHADERV2`, `TERRAINV2MAPPEDVC`, `TREESHADERBB`, `RZRUMBLESTRIP`, `RZGRASSSPRITES*`, `DIFFUSE*ALPHASPEC`, etc.) to stock GTR2 `GFX.GTR` shaders with clean per-level texture slicing, recovers referenced shared textures and animated frames from installed `ReizaCommon` / `commonmaps.MAS`, clamps `.AIW` `startinggrid`/`pitspots`/`garagespots` to actual slot counts, and sanitizes venue folder spaces.
-- **Automatic rFactor 1 (`.scn` + `.gdb` + `.mas`) track conversion (`rf1_track.py`)**: Detects AC vs rFactor 1 vs SCE track folders and `.zip` archives automatically, unpacks `.mas` archives via `masunpack.exe`, converts rF1 GMT v2.00 meshes directly to GTR2 GMT v2.10 (fixing per-submesh material indices, remapping rF1-only shaders to stock `GFX.GTR` shaders, appending required `MATH` stages for `L2BUMPSPECMAPT0`/`L2BUMPSPECT0`, supporting animated/BIK textures, and remapping `.tdf` surface prefixes to `specialfx.tec`), sanitizes spaces in texture filenames, clamps `.AIW` `garagespots` to `<= 3`, assigns GTR2-safe multi-layout IDs and `VenueName` entries, and composes GTR2 menu/loading images.
-- **`track_shadows` support in rF1/SCE mode**: Applies `[track] track_shadows` (`compact` / `off` / `full`, or `--track-shadows`) to `.scn` -> `.trk` conversion while always stripping `Dynamic, Texture` casters; all other AC-specific conversion options remain ignored for rF1 and SCE tracks.
-- **Track brightness boost (`track_brightness`)**: Added `[track] track_brightness` (`[0.0, 1.0]`, default `0.5`, CLI `--track-brightness`) for AC tracks (`0.0` disabled, `0.5` subtle daylight lift, `1.0` bright sunny look), smoothly brightening GMT diffuse/ambient material colors, daytime `.gdb` scene lighting, and stage-0 diffuse DDS textures while keeping night lighting dark.
+- **Stock Car Extreme (GSCE/SCE) track support**: Auto-detects SCE tracks, decrypts GMTs/textures, remaps Reiza shaders, recovers shared `ReizaCommon` textures, and fixes AIW/material compatibility.
+- **rFactor 1 track support**: Auto-detects rF1 tracks and `.zip` archives, unpacks `.mas` archives, converts GMT v2.00 meshes to GTR2 GMT v2.10, and generates GTR2 scenes, AIW, and UI images.
+- **`track_shadows` for rF1/SCE**: Applies `[track] track_shadows` (`compact` / `off` / `full`) to `.scn` -> `.trk` conversions; other AC options are ignored.
+- **Track brightness (`track_brightness`)**: Added `[track] track_brightness` (`0.0`–`1.0`, default `0.5`) to brighten daytime AC track lighting, materials, and diffuse textures.
 
 ### Initial Release
 
-- **Full AC-to-GTR2 conversion pipeline**: Converts Assetto Corsa tracks (single-layout, multi-layout, or `.zip` archives) into GTR2 locations with native unencrypted GMT v2.10 meshes, DX9 power-of-two DDS textures, `.trk`, `.gdb`, `.grd`, `.AIW`, `.cam`, and GTR2 UI images (`_LOD.jpg`, `_LOD_2.jpg`, `Thmb.tga`, `Track.bmp`).
-- **Native GTR2 GMT v2.10 binary converter (`gmt_gtr2.py`)**: Converts `io_rf2_gmt_release` rF2 GMT v2.52 exports directly into GTR2 GMT v2.10 (`GMOTOR_GMT_2.10\0` at offset `0x08`, 532-byte header, 108-byte mesh descriptors, 36-byte `FaceData` with plane distance `D` and mesh-local vertex indices, rebuilt face normals and bounding-sphere radii, and stock `GFX.GTR` shaders `L2DIFFUSET0`, `L2BUMPT0XT1`, and `L2BUMPSPECMAPT0` + `MATH` stages).
-- **GTR2 surface physics mapping**: Maps AC surfaces to GTR2 `specialfx.tec` material prefixes (`road`, `conc`, `rmbl`, `gras`, `grvl`, `dirt`, `cwal`, `twall`, `grdr`) and writes AC road/kerb dry and wet grip values into `.gdb`.
-- **GTR2 performance optimizations (shadows & spatial culling)**: Added `[track] track_shadows` (`compact` default / `off` / `full`) in `ac2gtr2.ini` (and `--track-shadows` CLI override) to match stock GTR2's projected shadow budgets (`ShadowReceiver=True` on road/ground only so cars cast shadows onto the track, `ShadowCaster=(Static, Solid, 32/64)` only on compact opaque structures `<= 60 m` / `<= 8000` tris, no expensive foliage `Texture` shadow maps, `MaxShadowRange=(200.0)`); added 250 m spatial tile splitting for wide AC meshes in `blender_stage.py`, stock-style `LODOut` distance culling for grass/foliage/small props, and tighter rearview clip plane (`400 m`).
-- **Configuration file support (`ac2gtr2.ini`)**: Supports `[track]` `texture_scale`, `texture_scale_min_size`, `road_smoothness`, `mesh_coarsening`, `strip_unused_gmt_data`, and `track_shadows`, with matching CLI overrides.
-- **All upstream AC pipeline fixes included**: MultiMap alpha and tint baking, all-zero alpha preservation in `bake_layers.py`, malformed DDS re-encoding in `fix_textures.py`, 58-char texture filename cap, skinned KN5 mesh parsing, tolerant AC `.ini` parsing, deterministic Blender QEM mesh coarsening, C2 triweight quadratic MLS road smoothing, and 31-character `Instance=` name capping.
+- **AC-to-GTR2 pipeline**: Converts single-layout, multi-layout, and `.zip` Assetto Corsa tracks into GTR2 locations with menu/loading images.
+- **Native GTR2 GMT v2.10 converter**: Converts rF2 GMT v2.52 exports directly into unencrypted GTR2 GMT v2.10 meshes and stock shaders.
+- **Surface physics mapping**: Maps AC surfaces to GTR2 `specialfx.tec` prefixes and writes road/kerb grip values to `.gdb`.
+- **Performance optimizations**: Added `track_shadows`, 250 m spatial mesh splitting, LOD culling, and tighter rearview clipping.
+- **Config file (`ac2gtr2.ini`)**: Added `[track]` settings for texture scaling, road smoothing, mesh coarsening, unused GMT stripping, and shadows.
+- **Upstream AC fixes**: Included MultiMap alpha/tint baking, DDS validation/re-encoding, skinned KN5 parsing, road smoothing, and 31-char instance name capping.
 
 ## Usage
 

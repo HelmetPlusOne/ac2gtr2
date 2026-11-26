@@ -16,8 +16,10 @@ Recreates ``dist/`` from scratch with:
 
 Usage:
     python build_dist.py [--dist <output dir>]
+    python build_dist.py --release
 """
 import argparse
+import datetime
 import os
 import shutil
 import subprocess
@@ -25,6 +27,7 @@ import sys
 import tempfile
 import time
 
+import sha256sum
 import steam_paths
 
 
@@ -173,10 +176,70 @@ def build_exe(dist_dir):
     return exe_path
 
 
+def find_7z(explicit=None):
+    """Locate 7z.exe (explicit flag, PATH, or standard 7-Zip install directories)."""
+    candidates = []
+    if explicit:
+        candidates.append(os.path.abspath(explicit))
+    for name in ("7z", "7za"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+    candidates.extend([
+        r"C:\Program Files\7-Zip\7z.exe",
+        r"C:\Program Files (x86)\7-Zip\7z.exe",
+    ])
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "7-Zip (7z.exe) not found; install 7-Zip or pass --7z \"<path to 7z.exe>\""
+    )
+
+
+def release_dist_dir(base_dir=HERE, today=None):
+    """Return the dated release directory path ``<base_dir>/ac2gtr2_YYYYMMDD``."""
+    day = today if today is not None else datetime.date.today()
+    return os.path.join(base_dir, "ac2gtr2_%s" % day.strftime("%Y%m%d"))
+
+
+def create_release_archive(dist_dir, seven_zip):
+    """Compress ``dist_dir`` into ``<dist_dir>.7z`` and write ``<dist_dir>.7z.sha256.txt``.
+
+    Returns ``(archive_path, checksum_path, digest)``.
+    """
+    dist_dir = os.path.abspath(dist_dir)
+    parent_dir = os.path.dirname(dist_dir)
+    folder_name = os.path.basename(dist_dir)
+    archive_name = folder_name + ".7z"
+    archive_path = os.path.join(parent_dir, archive_name)
+    checksum_path = archive_path + ".sha256.txt"
+
+    if os.path.exists(archive_path):
+        os.remove(archive_path)
+
+    print("\nCompressing %s -> %s ..." % (folder_name, archive_path), flush=True)
+    result = subprocess.run(
+        [seven_zip, "a", archive_name, folder_name],
+        cwd=parent_dir,
+    )
+    if result.returncode != 0 or not os.path.isfile(archive_path):
+        raise SystemExit("7z failed with exit code %d" % result.returncode)
+
+    digest = sha256sum.sha256_file(archive_path)
+    with open(checksum_path, "w", encoding="utf-8") as f:
+        f.write("%s  %s\n" % (digest, archive_name))
+    return archive_path, checksum_path, digest
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--dist", default=os.path.join(HERE, "dist"),
-                    help="output distribution directory (default: ./dist)")
+    ap.add_argument("--dist", default=None,
+                    help="output distribution directory (default: ./dist, or ./ac2gtr2_YYYYMMDD with --release)")
+    ap.add_argument("--release", action="store_true",
+                    help="build into ./ac2gtr2_YYYYMMDD, compress to .7z, and write .7z.sha256.txt")
+    ap.add_argument("--7z", dest="seven_zip", default=None,
+                    help="path to 7z.exe (used with --release)")
     ap.add_argument("--blender", default=None,
                     help="path to Blender folder or blender.exe")
     ap.add_argument("--addon", default=None,
@@ -189,7 +252,19 @@ def main(argv=None):
                     help="GTR2 folder containing GameData\\Locations\\specialfx.tec")
     args = ap.parse_args(argv)
 
-    dist_dir = os.path.abspath(args.dist)
+    if args.dist:
+        dist_dir = os.path.abspath(args.dist)
+    elif args.release:
+        dist_dir = os.path.abspath(release_dist_dir(HERE))
+    else:
+        dist_dir = os.path.abspath(os.path.join(HERE, "dist"))
+
+    seven_zip = None
+    if args.release:
+        try:
+            seven_zip = find_7z(args.seven_zip)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
     blender_src = find_blender_dir(args.blender)
     addon_src = find_addon_dir(blender_src, args.addon)
     texconv_src = os.path.abspath(args.texconv or steam_paths.TEXCONV)
@@ -275,6 +350,17 @@ def main(argv=None):
     print("  tools/blender: %.1f MB (with %s)" % (dir_size_mb(blender_dst), ADDON_NAME))
     print("  tools/texconv: %.1f MB" % dir_size_mb(texconv_dst))
     print("  total size:    %.1f MB" % dir_size_mb(dist_dir))
+
+    if args.release:
+        archive_path, checksum_path, digest = create_release_archive(dist_dir, seven_zip)
+        print("\nRelease archive ready:")
+        print("  archive:       %s (%.1f MB)" % (
+            archive_path,
+            os.path.getsize(archive_path) / (1024.0 * 1024.0),
+        ))
+        print("  sha256:        %s" % digest)
+        print("  checksum file: %s" % checksum_path)
+
     print("\nUsage:")
     print("  Drag and drop an AC track folder onto %s" % exe_path)
     print("  %s build_track \"<AC track folder or zip>\"" % exe_path)
