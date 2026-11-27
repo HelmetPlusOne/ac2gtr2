@@ -10,6 +10,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 
 ### 27 Nov 2026
 
+- **CSP hidden mesh support (`ext_config.ini`)**: Honors unconditional CSP `[MESH_ADJUSTMENT]` rules with `IS_RENDERABLE = 0` / `IS_VISIBLE = 0` / `IS_ACTIVE = 0`, preventing invisible physics bump overlays and replaced 2D crowd placeholders (e.g., magenta surfaces/crowds on tracks like Sebring 60s) from rendering visibly in GTR2 while keeping physical collision intact.
 - **HAT crash fix for large AC tracks**: Strips zero-area degenerate faces, long needle slivers (`> 50 m` span, `< 10 m` wide), and oversized (`> 50 m`) or distant (`> 200 m` from AIW) off-road terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
 - **Portable dist-local tool paths & rFactorTools bundling**: Removed all hardcoded local tool paths, made `dist` builds always resolve tools locally (with direct Python runs loading tools from `<script_path>/dist/`), and bundled `rFactorTools` (`masunpack.exe`, `rfactorcrypt.exe`, and runtime libraries) into `tools\rfactortools\` so rF1/SCE conversions work standalone.
 

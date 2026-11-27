@@ -3,3 +3,4 @@ dist/
 work/
 __pycache__/
 .venv/
+build_release.bat
