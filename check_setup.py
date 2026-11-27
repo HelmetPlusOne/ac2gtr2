@@ -107,10 +107,12 @@ def check_track(rep, track_dir, layout):
     rep.ok("track %s" % name)
 
 
-def check_blender(rep, blender):
+def check_blender(rep, blender, dist_hint=None):
     if not os.path.isfile(blender):
-        rep.problem("Blender not found at %s" % blender,
-                    "Install Blender 3.6 LTS, or pass --blender \"<path to blender.exe>\"")
+        rep.problem(
+            "Blender not found at %s" % blender,
+            dist_hint or "Run 'python build_dist.py' first, or pass --blender \"<path to blender.exe>\"",
+        )
         return
     try:
         r = subprocess.run([blender, "--background", "--factory-startup",
@@ -233,19 +235,27 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         rep.problem("NumPy is not installed for this Python (%s)" % sys.executable,
                     "Run:  python -m pip install numpy")
 
+    dist_hint = (
+        "Ensure the standalone dist folder is complete (missing bundled tool/data)."
+        if steam_paths.IS_STANDALONE
+        else "Run 'python build_dist.py' first to build %s with bundled tools and data."
+        % steam_paths.TOOLS_ROOT
+    )
+    if not steam_paths.IS_STANDALONE and not steam_paths.dist_ready():
+        rep.problem(
+            "dist/ tools bundle not found at %s" % steam_paths.TOOLS_ROOT,
+            "Run 'python build_dist.py' first before running Python scripts directly.",
+        )
+
     if not is_rf1:
         surfaces = os.path.join(steam_paths.AC_DIR, "system", "data", "surfaces.ini")
         if os.path.exists(surfaces):
             rep.ok("Assetto Corsa  %s" % steam_paths.AC_DIR)
         else:
-            rep.problem("Assetto Corsa not found (no %s)" % surfaces,
-                        "If it is installed somewhere Steam does not list, pass "
-                        "--ac \"<assettocorsa folder>\"")
+            rep.problem("Assetto Corsa data not found (no %s)" % surfaces, dist_hint)
 
     if not os.path.isdir(steam_paths.GTR2_DIR):
-        rep.problem("GTR2 not found (looked for %s)" % steam_paths.GTR2_DIR,
-                    "If it is installed somewhere else, pass "
-                    "--gtr2 \"<GTR2 folder>\"")
+        rep.problem("GTR2 data not found (looked for %s)" % steam_paths.GTR2_DIR, dist_hint)
     else:
         rep.ok("GTR2           %s" % steam_paths.GTR2_DIR)
         sfx = os.path.join(steam_paths.LOCATIONS, "specialfx.tec")
@@ -255,21 +265,20 @@ def check(track_dir=None, layout=None, blender=None, install=None,
     if os.path.isfile(steam_paths.TEXCONV):
         rep.ok("texconv.exe    %s" % steam_paths.TEXCONV)
     else:
-        rep.problem("texconv.exe not found at %s" % steam_paths.TEXCONV,
-                    "Install DirectXTex texconv.exe or pass --texconv \"<path>\"")
+        rep.problem("texconv.exe not found at %s" % steam_paths.TEXCONV, dist_hint)
 
     if is_rf1:
         if os.path.isfile(steam_paths.MASUNPACK):
             rep.ok("masunpack.exe  %s" % steam_paths.MASUNPACK)
         else:
             rep.problem("masunpack.exe not found at %s" % steam_paths.MASUNPACK,
-                        "Pass --masunpack \"<path to masunpack.exe>\" or set AC2GTR2_MASUNPACK")
+                        dist_hint + "\nOr pass --masunpack \"<path to masunpack.exe>\".")
         if is_sce:
             if os.path.isfile(steam_paths.RFACTORCRYPT):
                 rep.ok("rfactorcrypt   %s" % steam_paths.RFACTORCRYPT)
             else:
                 rep.problem("rfactorcrypt.exe not found at %s" % steam_paths.RFACTORCRYPT,
-                            "Pass --rfactorcrypt \"<path to rfactorcrypt.exe>\" or set AC2GTR2_RFACTORCRYPT")
+                            dist_hint + "\nOr pass --rfactorcrypt \"<path to rfactorcrypt.exe>\".")
             common_dirs = steam_paths.find_sce_common_dirs()
             if common_dirs:
                 rep.ok("ReizaCommon    %s" % common_dirs[0])
@@ -286,7 +295,7 @@ def check(track_dir=None, layout=None, blender=None, install=None,
         check_track(rep, os.path.abspath(track_dir), layout)
 
     if need_blender and not is_rf1:
-        check_blender(rep, blender)
+        check_blender(rep, blender, dist_hint=dist_hint)
 
     free = shutil.disk_usage(steam_paths.APP_DIR).free / 1e9
     if free < MIN_FREE_GB:

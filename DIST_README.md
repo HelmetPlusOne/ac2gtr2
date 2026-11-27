@@ -11,6 +11,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 ### TBD
 
 - **HAT crash fix for large AC tracks**: Strips zero-area degenerate faces, long needle slivers (`> 50 m` span, `< 10 m` wide), and oversized (`> 50 m`) or distant (`> 200 m` from AIW) off-road terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
+- **Portable dist-local tool paths**: Removed all hardcoded local tool paths; standalone `dist` builds always resolve tools locally, direct Python runs load all tools from `<script_path>/dist/` (requiring `build_dist.py` first), and `build_dist.py` bundles `rfactortools` when available.
 
 ### 26 Nov 2026
 

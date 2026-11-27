@@ -26,11 +26,6 @@ HERE = (
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
-BLENDER = (
-    os.path.join(HERE, "tools", "blender", "blender.exe")
-    if os.path.isfile(os.path.join(HERE, "tools", "blender", "blender.exe"))
-    else r"D:\Apps\Blender\blender.exe"
-)
 
 
 def stage_cmd(script_name, *stage_args):

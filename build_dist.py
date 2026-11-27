@@ -85,13 +85,126 @@ WORK_README = (
 )
 
 
-def find_blender_dir(explicit):
+def _program_files_dirs():
+    out = []
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        val = os.environ.get(var)
+        if val and os.path.isdir(val):
+            out.append(val)
+    return out
+
+
+def find_blender_dir(explicit, fallback_dist=None):
+    candidates = []
     if explicit:
         path = os.path.abspath(explicit)
         if os.path.isfile(path):
             path = os.path.dirname(path)
         return path
-    return os.path.dirname(os.path.abspath(steam_paths.BLENDER))
+    env_b = os.environ.get("AC2GTR2_BLENDER")
+    if env_b:
+        path = os.path.abspath(env_b)
+        return os.path.dirname(path) if os.path.isfile(path) else path
+    which_b = shutil.which("blender")
+    if which_b:
+        candidates.append(os.path.dirname(os.path.abspath(which_b)))
+    for pf in _program_files_dirs():
+        candidates.append(os.path.join(pf, "Blender Foundation", "Blender 3.6"))
+    if fallback_dist:
+        candidates.append(os.path.join(fallback_dist, "tools", "blender"))
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, "blender.exe")):
+            return path
+    return candidates[0] if candidates else ""
+
+
+def find_texconv(explicit, fallback_dist=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    env_t = os.environ.get("AC2GTR2_TEXCONV")
+    if env_t:
+        return os.path.abspath(env_t)
+    which_t = shutil.which("texconv")
+    if which_t:
+        return os.path.abspath(which_t)
+    rf2_dir = os.environ.get("AC2GTR2_RF2_DIR") or steam_paths.game_dir("rFactor 2")
+    if rf2_dir:
+        cand = os.path.join(rf2_dir, "Support", "Tools", "MapConverter", "texconv.exe")
+        if os.path.isfile(cand):
+            return cand
+    if fallback_dist:
+        cand = os.path.join(fallback_dist, "tools", "texconv", "texconv.exe")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def find_masunpack(explicit, fallback_dist=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    env_m = os.environ.get("AC2GTR2_MASUNPACK")
+    if env_m:
+        return os.path.abspath(env_m)
+    which_m = shutil.which("masunpack")
+    if which_m:
+        return os.path.abspath(which_m)
+    if fallback_dist:
+        cand = os.path.join(fallback_dist, "tools", "rfactortools", "masunpack.exe")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def find_rfactorcrypt(explicit, masunpack_path=None, fallback_dist=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    env_r = os.environ.get("AC2GTR2_RFACTORCRYPT")
+    if env_r:
+        return os.path.abspath(env_r)
+    if masunpack_path:
+        sibling = os.path.join(os.path.dirname(os.path.abspath(masunpack_path)), "rfactorcrypt.exe")
+        if os.path.isfile(sibling):
+            return sibling
+    which_r = shutil.which("rfactorcrypt")
+    if which_r:
+        return os.path.abspath(which_r)
+    if fallback_dist:
+        cand = os.path.join(fallback_dist, "tools", "rfactortools", "rfactorcrypt.exe")
+        if os.path.isfile(cand):
+            return cand
+    return ""
+
+
+def find_ac_dir(explicit, fallback_dist=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    env_ac = os.environ.get("AC2GTR2_AC_DIR")
+    if env_ac:
+        return os.path.abspath(env_ac)
+    cand = steam_paths.game_dir("assettocorsa")
+    if cand and os.path.isfile(os.path.join(cand, "system", "data", "surfaces.ini")):
+        return cand
+    if fallback_dist:
+        fb = os.path.join(fallback_dist, "data", "ac")
+        if os.path.isfile(os.path.join(fb, "system", "data", "surfaces.ini")):
+            return fb
+    return cand
+
+
+def find_gtr2_dir(explicit, fallback_dist=None):
+    if explicit:
+        return os.path.abspath(explicit)
+    env_g = os.environ.get("AC2GTR2_GAME_DIR")
+    if env_g:
+        return os.path.abspath(env_g)
+    cand = steam_paths.find_gtr2_dir()
+    if cand and os.path.isfile(os.path.join(cand, "GameData", "Locations", "specialfx.tec")):
+        return cand
+    if fallback_dist:
+        fb = os.path.join(fallback_dist, "data", "gtr2")
+        if os.path.isfile(os.path.join(fb, "GameData", "Locations", "specialfx.tec")):
+            return fb
+    return cand
 
 
 def find_addon_dir(blender_dir, explicit):
@@ -177,7 +290,7 @@ def build_exe(dist_dir):
 
 
 def find_7z(explicit=None):
-    """Locate 7z.exe (explicit flag, PATH, or standard 7-Zip install directories)."""
+    """Locate 7z.exe (explicit flag, PATH, or %ProgramFiles%\\7-Zip)."""
     candidates = []
     if explicit:
         candidates.append(os.path.abspath(explicit))
@@ -185,10 +298,8 @@ def find_7z(explicit=None):
         found = shutil.which(name)
         if found:
             candidates.append(found)
-    candidates.extend([
-        r"C:\Program Files\7-Zip\7z.exe",
-        r"C:\Program Files (x86)\7-Zip\7z.exe",
-    ])
+    for pf in _program_files_dirs():
+        candidates.append(os.path.join(pf, "7-Zip", "7z.exe"))
     for path in candidates:
         if path and os.path.isfile(path):
             return path
@@ -246,6 +357,10 @@ def main(argv=None):
                     help="path to io_rf2_gmt_release addon folder")
     ap.add_argument("--texconv", default=None,
                     help="path to texconv.exe")
+    ap.add_argument("--masunpack", default=None,
+                    help="path to masunpack.exe for rFactor 1 / Stock Car Extreme .mas archives")
+    ap.add_argument("--rfactorcrypt", default=None,
+                    help="path to rfactorcrypt.exe for Stock Car Extreme encrypted .gmt files")
     ap.add_argument("--ac", default=None,
                     help="Assetto Corsa folder containing system\\data\\surfaces.ini")
     ap.add_argument("--gtr2", default=None,
@@ -259,30 +374,51 @@ def main(argv=None):
     else:
         dist_dir = os.path.abspath(os.path.join(HERE, "dist"))
 
+    # Reuse an existing ./dist bundle as fallback source only when building
+    # into a different target directory (e.g. --release into ./ac2gtr2_YYYYMMDD).
+    default_dist = os.path.abspath(os.path.join(HERE, "dist"))
+    fallback_dist = (
+        default_dist
+        if os.path.isdir(default_dist)
+        and os.path.normcase(dist_dir) != os.path.normcase(default_dist)
+        else None
+    )
+
     seven_zip = None
     if args.release:
         try:
             seven_zip = find_7z(args.seven_zip)
         except FileNotFoundError as exc:
             raise SystemExit(str(exc)) from exc
-    blender_src = find_blender_dir(args.blender)
-    addon_src = find_addon_dir(blender_src, args.addon)
-    texconv_src = os.path.abspath(args.texconv or steam_paths.TEXCONV)
-    ac_dir = os.path.abspath(args.ac or steam_paths.AC_DIR)
-    gtr2_dir = os.path.abspath(args.gtr2 or steam_paths.GTR2_DIR)
+    blender_src = find_blender_dir(args.blender, fallback_dist=fallback_dist)
+    addon_src = find_addon_dir(blender_src, args.addon) if blender_src else ""
+    texconv_src = find_texconv(args.texconv, fallback_dist=fallback_dist)
+    masunpack_src = find_masunpack(args.masunpack, fallback_dist=fallback_dist)
+    rfactorcrypt_src = find_rfactorcrypt(
+        args.rfactorcrypt, masunpack_path=masunpack_src, fallback_dist=fallback_dist
+    )
+    ac_dir = find_ac_dir(args.ac, fallback_dist=fallback_dist)
+    gtr2_dir = find_gtr2_dir(args.gtr2, fallback_dist=fallback_dist)
 
-    surfaces_src = os.path.join(ac_dir, "system", "data", "surfaces.ini")
-    specialfx_src = os.path.join(gtr2_dir, "GameData", "Locations", "specialfx.tec")
+    surfaces_src = os.path.join(ac_dir, "system", "data", "surfaces.ini") if ac_dir else ""
+    specialfx_src = os.path.join(gtr2_dir, "GameData", "Locations", "specialfx.tec") if gtr2_dir else ""
 
-    for label, path, check in (
-        ("Blender", os.path.join(blender_src, "blender.exe"), os.path.isfile),
-        ("Blender addon", addon_src, os.path.isdir),
-        ("texconv.exe", texconv_src, os.path.isfile),
-        ("AC surfaces.ini", surfaces_src, os.path.isfile),
-        ("GTR2 specialfx.tec", specialfx_src, os.path.isfile),
+    for label, path, check, hint in (
+        ("Blender", os.path.join(blender_src, "blender.exe") if blender_src else "", os.path.isfile, "--blender"),
+        ("Blender addon", addon_src, os.path.isdir, "--addon"),
+        ("texconv.exe", texconv_src, os.path.isfile, "--texconv"),
+        ("AC surfaces.ini", surfaces_src, os.path.isfile, "--ac"),
+        ("GTR2 specialfx.tec", specialfx_src, os.path.isfile, "--gtr2"),
     ):
-        if not check(path):
-            raise SystemExit("Required source missing (%s): %s" % (label, path))
+        if not path or not check(path):
+            raise SystemExit(
+                "Required source missing (%s): %s (pass %s)"
+                % (label, path or "<not found>", hint)
+            )
+    if args.masunpack and not os.path.isfile(masunpack_src):
+        raise SystemExit("Required source missing (masunpack.exe): %s" % masunpack_src)
+    if args.rfactorcrypt and not os.path.isfile(rfactorcrypt_src):
+        raise SystemExit("Required source missing (rfactorcrypt.exe): %s" % rfactorcrypt_src)
 
     print("Recreating %s ..." % dist_dir, flush=True)
     if os.path.exists(dist_dir):
@@ -305,10 +441,22 @@ def main(argv=None):
     for script in BLENDER_SCRIPTS:
         shutil.copy2(os.path.join(HERE, script), os.path.join(scripts_dst, script))
 
-    # 3. Copy texconv.exe.
+    # 3. Copy texconv.exe (and optional rfactortools for rF1/SCE support).
     texconv_dst = os.path.join(dist_dir, "tools", "texconv")
     os.makedirs(texconv_dst, exist_ok=True)
     shutil.copy2(texconv_src, os.path.join(texconv_dst, "texconv.exe"))
+
+    rftools_dst = os.path.join(dist_dir, "tools", "rfactortools")
+    if masunpack_src and os.path.isfile(masunpack_src):
+        os.makedirs(rftools_dst, exist_ok=True)
+        shutil.copy2(masunpack_src, os.path.join(rftools_dst, "masunpack.exe"))
+    else:
+        print("WARNING: masunpack.exe not found; pass --masunpack to bundle rF1/SCE .mas support", flush=True)
+    if rfactorcrypt_src and os.path.isfile(rfactorcrypt_src):
+        os.makedirs(rftools_dst, exist_ok=True)
+        shutil.copy2(rfactorcrypt_src, os.path.join(rftools_dst, "rfactorcrypt.exe"))
+    else:
+        print("WARNING: rfactorcrypt.exe not found; pass --rfactorcrypt to bundle SCE decryption support", flush=True)
 
     # 4. Copy standalone template data from AC and GTR2.
     ac_data_dst = os.path.join(dist_dir, "data", "ac", "system", "data")

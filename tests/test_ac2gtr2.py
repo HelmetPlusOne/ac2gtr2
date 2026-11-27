@@ -1151,6 +1151,84 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             with open(checksum_path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), "%s  ac2gtr2_20261126.7z\n" % digest)
 
+    def test_no_hardcoded_local_tool_paths_and_dist_tool_resolution(self):
+        import ast
+        import io
+        import pathlib
+        import re
+        import check_setup
+
+        # 1. Verify no production Python file encodes a hardcoded drive-letter local path.
+        repo_root = pathlib.Path(steam_paths.__file__).resolve().parent
+        drive_pat = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/]")
+        offenders = []
+        for py in sorted(repo_root.glob("*.py")):
+            tree = ast.parse(py.read_text(encoding="utf-8", errors="replace"), filename=py.name)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if drive_pat.search(node.value):
+                        offenders.append("%s:%d: %r" % (py.name, node.lineno, node.value))
+        self.assertEqual(offenders, [], "Hardcoded local paths found:\n" + "\n".join(offenders))
+
+        # 2. Running from dist (frozen) ALWAYS uses dist-local paths even if env vars are set.
+        with tempfile.TemporaryDirectory() as tmp:
+            dist_root = os.path.join(tmp, "my_dist")
+            os.makedirs(dist_root)
+            fake_env = {
+                "AC2GTR2_BLENDER": os.path.join(tmp, "external", "blender.exe"),
+                "AC2GTR2_TEXCONV": os.path.join(tmp, "external", "texconv.exe"),
+                "AC2GTR2_MASUNPACK": os.path.join(tmp, "external", "masunpack.exe"),
+                "AC2GTR2_RFACTORCRYPT": os.path.join(tmp, "external", "rfactorcrypt.exe"),
+                "AC2GTR2_AC_DIR": os.path.join(tmp, "external", "ac"),
+                "AC2GTR2_GAME_DIR": os.path.join(tmp, "external", "gtr2"),
+            }
+            dist_paths = steam_paths.resolve_paths(app_root=dist_root, frozen=True, env=fake_env)
+            self.assertTrue(dist_paths["IS_STANDALONE"])
+            self.assertEqual(dist_paths["TOOLS_ROOT"], os.path.abspath(dist_root))
+            self.assertEqual(dist_paths["BLENDER"], os.path.join(dist_root, "tools", "blender", "blender.exe"))
+            self.assertEqual(dist_paths["BLENDER_STAGE"], os.path.join(dist_root, "tools", "blender_scripts", "blender_stage.py"))
+            self.assertEqual(dist_paths["TEXCONV"], os.path.join(dist_root, "tools", "texconv", "texconv.exe"))
+            self.assertEqual(dist_paths["MASUNPACK"], os.path.join(dist_root, "tools", "rfactortools", "masunpack.exe"))
+            self.assertEqual(dist_paths["RFACTORCRYPT"], os.path.join(dist_root, "tools", "rfactortools", "rfactorcrypt.exe"))
+            self.assertEqual(dist_paths["AC_DIR"], os.path.join(dist_root, "data", "ac"))
+            self.assertEqual(dist_paths["GTR2_DIR"], os.path.join(dist_root, "data", "gtr2"))
+
+            # 3. Running from Python directly gets all tools from <script_path>/dist/.
+            src_root = os.path.join(tmp, "repo")
+            os.makedirs(src_root)
+            with open(os.path.join(src_root, "blender_stage.py"), "w", encoding="utf-8") as f:
+                f.write("# stub\n")
+            py_paths = steam_paths.resolve_paths(app_root=src_root, frozen=False, env={})
+            expected_dist = os.path.join(src_root, "dist")
+            self.assertFalse(py_paths["IS_STANDALONE"])
+            self.assertEqual(py_paths["TOOLS_ROOT"], expected_dist)
+            self.assertFalse(steam_paths.dist_ready(py_paths["TOOLS_ROOT"]))
+            self.assertEqual(py_paths["BLENDER"], os.path.join(expected_dist, "tools", "blender", "blender.exe"))
+            self.assertEqual(py_paths["TEXCONV"], os.path.join(expected_dist, "tools", "texconv", "texconv.exe"))
+            self.assertEqual(py_paths["MASUNPACK"], os.path.join(expected_dist, "tools", "rfactortools", "masunpack.exe"))
+            self.assertEqual(py_paths["RFACTORCRYPT"], os.path.join(expected_dist, "tools", "rfactortools", "rfactorcrypt.exe"))
+            self.assertEqual(py_paths["AC_DIR"], os.path.join(expected_dist, "data", "ac"))
+            self.assertEqual(py_paths["GTR2_DIR"], os.path.join(expected_dist, "data", "gtr2"))
+            self.assertEqual(py_paths["BLENDER_STAGE"], os.path.join(src_root, "blender_stage.py"))
+
+            # 4. check_setup requires build_dist.py to be run first when dist/ is missing.
+            buf = io.StringIO()
+            with mock.patch.object(steam_paths, "IS_STANDALONE", False), \
+                    mock.patch.object(steam_paths, "TOOLS_ROOT", expected_dist), \
+                    mock.patch.object(steam_paths, "AC_DIR", py_paths["AC_DIR"]), \
+                    mock.patch.object(steam_paths, "GTR2_DIR", py_paths["GTR2_DIR"]), \
+                    mock.patch.object(steam_paths, "TEXCONV", py_paths["TEXCONV"]), \
+                    mock.patch.object(steam_paths, "APP_DIR", src_root), \
+                    mock.patch.object(sys, "stdout", buf):
+                ok = check_setup.check(need_blender=False)
+            self.assertFalse(ok)
+            self.assertIn("build_dist.py", buf.getvalue())
+
+            # Once dist/tools and dist/data exist, dist_ready() is True.
+            os.makedirs(os.path.join(expected_dist, "tools"))
+            os.makedirs(os.path.join(expected_dist, "data"))
+            self.assertTrue(steam_paths.dist_ready(expected_dist))
+
 
 if __name__ == "__main__":
     unittest.main()

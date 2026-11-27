@@ -1119,8 +1119,8 @@ def main():
                     help="GTR2 GameData\\Locations folder to copy into")
     ap.add_argument("--preview",
                     help="AC track map or UI preview image for GTR2 menu/loading screens")
-    ap.add_argument("--texconv", default="texconv.exe",
-                    help="path to texconv.exe for converting menu images")
+    ap.add_argument("--texconv", default=None,
+                    help="path to texconv.exe for converting menu images (defaults to bundled dist texconv.exe)")
     ap.add_argument("--road-smoothness", type=float, default=None,
                     help="road surface smoothing in [0.0, 1.0] mapped uniformly to sigma in [0m, 8m] (0 disables, 0.5 -> 4m default, 1.0 -> 8m max; default from ac2gtr2.ini / 0.5)")
     ap.add_argument("--mesh-coarsening", type=float, default=None,
@@ -1139,6 +1139,8 @@ def main():
         _cfg = steam_paths.load_config()
     except ValueError as exc:
         raise SystemExit("config error: %s" % exc)
+    if not args.texconv:
+        args.texconv = steam_paths.TEXCONV
     if args.road_smoothness is None:
         args.road_smoothness = _cfg["road_smoothness"]
     try:
