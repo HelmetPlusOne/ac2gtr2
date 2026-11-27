@@ -1151,6 +1151,20 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             with open(checksum_path, encoding="utf-8") as f:
                 self.assertEqual(f.read(), "%s  ac2gtr2_20261126.7z\n" % digest)
 
+        # _ignore_rfactortools strips unused GUI/Tcl/Tk/checksums while keeping CLI runtime.
+        skipped = build_dist._ignore_rfactortools(".", [
+            "masunpack.exe", "rfactorcrypt.exe", "python33.dll", "library.zip",
+            "rfactortools._crypt.pyd", "PIL._imaging.pyd", "COPYING.txt",
+            "rfactortools-gui.exe", "minised-gui.exe", "maspack.exe",
+            "checksums", "data", "tcl", "tk", "tcl85.dll", "tk85.dll", "_tkinter.pyd",
+        ])
+        for keep in ("masunpack.exe", "rfactorcrypt.exe", "python33.dll", "library.zip",
+                     "rfactortools._crypt.pyd", "PIL._imaging.pyd", "COPYING.txt"):
+            self.assertNotIn(keep, skipped)
+        for drop in ("rfactortools-gui.exe", "minised-gui.exe", "maspack.exe",
+                     "checksums", "data", "tcl", "tk", "tcl85.dll", "tk85.dll", "_tkinter.pyd"):
+            self.assertIn(drop, skipped)
+
     def test_no_hardcoded_local_tool_paths_and_dist_tool_resolution(self):
         import ast
         import io

@@ -9,6 +9,7 @@ Recreates ``dist/`` from scratch with:
     pre-installed inside ``3.6/scripts/addons/``)
   - ``tools/blender_scripts/`` (``blender_stage.py``, ``kn5.py``, ``backdrop.py``, ``mesh_coarsen.py``)
   - ``tools/texconv/texconv.exe``
+  - ``tools/rfactortools/`` (``masunpack.exe``, ``rfactorcrypt.exe``, and required runtime DLLs/libraries)
   - ``data/ac/system/data/surfaces.ini``
   - ``data/gtr2/GameData/Locations/specialfx.tec``
   - ``out/`` (default automatic install destination for converted tracks, with ``readme.txt``)
@@ -139,9 +140,20 @@ def find_texconv(explicit, fallback_dist=None):
     return ""
 
 
-def find_masunpack(explicit, fallback_dist=None):
+def find_masunpack(explicit, rfactortools_dir=None, fallback_dist=None):
     if explicit:
-        return os.path.abspath(explicit)
+        path = os.path.abspath(explicit)
+        if os.path.isdir(path):
+            return os.path.join(path, "masunpack.exe")
+        return path
+    if rfactortools_dir:
+        path = os.path.abspath(rfactortools_dir)
+        return path if os.path.isfile(path) else os.path.join(path, "masunpack.exe")
+    env_rt = os.environ.get("AC2GTR2_RFACTORTOOLS")
+    if env_rt:
+        cand = os.path.join(os.path.abspath(env_rt), "masunpack.exe")
+        if os.path.isfile(cand):
+            return cand
     env_m = os.environ.get("AC2GTR2_MASUNPACK")
     if env_m:
         return os.path.abspath(env_m)
@@ -155,9 +167,17 @@ def find_masunpack(explicit, fallback_dist=None):
     return ""
 
 
-def find_rfactorcrypt(explicit, masunpack_path=None, fallback_dist=None):
+def find_rfactorcrypt(explicit, masunpack_path=None, rfactortools_dir=None, fallback_dist=None):
     if explicit:
-        return os.path.abspath(explicit)
+        path = os.path.abspath(explicit)
+        if os.path.isdir(path):
+            return os.path.join(path, "rfactorcrypt.exe")
+        return path
+    if rfactortools_dir:
+        path = os.path.abspath(rfactortools_dir)
+        cand = os.path.join(os.path.dirname(path) if os.path.isfile(path) else path, "rfactorcrypt.exe")
+        if os.path.isfile(cand):
+            return cand
     env_r = os.environ.get("AC2GTR2_RFACTORCRYPT")
     if env_r:
         return os.path.abspath(env_r)
@@ -239,6 +259,21 @@ def _ignore_blender(_dirpath, names):
 
 def _ignore_pycache(_dirpath, names):
     return {n for n in names if n == "__pycache__"}
+
+
+_RFACTORTOOLS_SKIP_DIRS = frozenset({"checksums", "data", "tcl", "tk", "__pycache__"})
+_RFACTORTOOLS_SKIP_FILES = frozenset({
+    "maspack.exe", "minised-gui.exe", "rfactortools-gui.exe",
+    "logo.png", "tcl85.dll", "tk85.dll", "_tkinter.pyd",
+})
+
+
+def _ignore_rfactortools(_dirpath, names):
+    """Skip unused GUI binaries/Tcl/Tk/checksums from rfactortools while keeping CLI runtime."""
+    return {
+        n for n in names
+        if n.lower() in _RFACTORTOOLS_SKIP_DIRS or n.lower() in _RFACTORTOOLS_SKIP_FILES
+    }
 
 
 def dir_size_mb(path):
@@ -357,6 +392,8 @@ def main(argv=None):
                     help="path to io_rf2_gmt_release addon folder")
     ap.add_argument("--texconv", default=None,
                     help="path to texconv.exe")
+    ap.add_argument("--rfactortools", default=None,
+                    help="path to rfactortools directory containing masunpack.exe and rfactorcrypt.exe")
     ap.add_argument("--masunpack", default=None,
                     help="path to masunpack.exe for rFactor 1 / Stock Car Extreme .mas archives")
     ap.add_argument("--rfactorcrypt", default=None,
@@ -393,9 +430,12 @@ def main(argv=None):
     blender_src = find_blender_dir(args.blender, fallback_dist=fallback_dist)
     addon_src = find_addon_dir(blender_src, args.addon) if blender_src else ""
     texconv_src = find_texconv(args.texconv, fallback_dist=fallback_dist)
-    masunpack_src = find_masunpack(args.masunpack, fallback_dist=fallback_dist)
+    masunpack_src = find_masunpack(
+        args.masunpack, rfactortools_dir=args.rfactortools, fallback_dist=fallback_dist
+    )
     rfactorcrypt_src = find_rfactorcrypt(
-        args.rfactorcrypt, masunpack_path=masunpack_src, fallback_dist=fallback_dist
+        args.rfactorcrypt, masunpack_path=masunpack_src,
+        rfactortools_dir=args.rfactortools, fallback_dist=fallback_dist,
     )
     ac_dir = find_ac_dir(args.ac, fallback_dist=fallback_dist)
     gtr2_dir = find_gtr2_dir(args.gtr2, fallback_dist=fallback_dist)
@@ -407,6 +447,8 @@ def main(argv=None):
         ("Blender", os.path.join(blender_src, "blender.exe") if blender_src else "", os.path.isfile, "--blender"),
         ("Blender addon", addon_src, os.path.isdir, "--addon"),
         ("texconv.exe", texconv_src, os.path.isfile, "--texconv"),
+        ("masunpack.exe", masunpack_src, os.path.isfile, "--rfactortools / --masunpack"),
+        ("rfactorcrypt.exe", rfactorcrypt_src, os.path.isfile, "--rfactortools / --rfactorcrypt"),
         ("AC surfaces.ini", surfaces_src, os.path.isfile, "--ac"),
         ("GTR2 specialfx.tec", specialfx_src, os.path.isfile, "--gtr2"),
     ):
@@ -415,10 +457,6 @@ def main(argv=None):
                 "Required source missing (%s): %s (pass %s)"
                 % (label, path or "<not found>", hint)
             )
-    if args.masunpack and not os.path.isfile(masunpack_src):
-        raise SystemExit("Required source missing (masunpack.exe): %s" % masunpack_src)
-    if args.rfactorcrypt and not os.path.isfile(rfactorcrypt_src):
-        raise SystemExit("Required source missing (rfactorcrypt.exe): %s" % rfactorcrypt_src)
 
     print("Recreating %s ..." % dist_dir, flush=True)
     if os.path.exists(dist_dir):
@@ -441,22 +479,17 @@ def main(argv=None):
     for script in BLENDER_SCRIPTS:
         shutil.copy2(os.path.join(HERE, script), os.path.join(scripts_dst, script))
 
-    # 3. Copy texconv.exe (and optional rfactortools for rF1/SCE support).
+    # 3. Copy texconv.exe and rfactortools (masunpack.exe + rfactorcrypt.exe + runtime DLLs).
     texconv_dst = os.path.join(dist_dir, "tools", "texconv")
     os.makedirs(texconv_dst, exist_ok=True)
     shutil.copy2(texconv_src, os.path.join(texconv_dst, "texconv.exe"))
 
+    rftools_src = os.path.dirname(os.path.abspath(masunpack_src))
     rftools_dst = os.path.join(dist_dir, "tools", "rfactortools")
-    if masunpack_src and os.path.isfile(masunpack_src):
-        os.makedirs(rftools_dst, exist_ok=True)
-        shutil.copy2(masunpack_src, os.path.join(rftools_dst, "masunpack.exe"))
-    else:
-        print("WARNING: masunpack.exe not found; pass --masunpack to bundle rF1/SCE .mas support", flush=True)
-    if rfactorcrypt_src and os.path.isfile(rfactorcrypt_src):
-        os.makedirs(rftools_dst, exist_ok=True)
+    print("Copying rfactortools -> %s ..." % rftools_dst, flush=True)
+    shutil.copytree(rftools_src, rftools_dst, ignore=_ignore_rfactortools)
+    if os.path.normcase(os.path.dirname(os.path.abspath(rfactorcrypt_src))) != os.path.normcase(rftools_src):
         shutil.copy2(rfactorcrypt_src, os.path.join(rftools_dst, "rfactorcrypt.exe"))
-    else:
-        print("WARNING: rfactorcrypt.exe not found; pass --rfactorcrypt to bundle SCE decryption support", flush=True)
 
     # 4. Copy standalone template data from AC and GTR2.
     ac_data_dst = os.path.join(dist_dir, "data", "ac", "system", "data")
@@ -497,6 +530,7 @@ def main(argv=None):
     print("  documentation: README.md")
     print("  tools/blender: %.1f MB (with %s)" % (dir_size_mb(blender_dst), ADDON_NAME))
     print("  tools/texconv: %.1f MB" % dir_size_mb(texconv_dst))
+    print("  tools/rftools: %.1f MB" % dir_size_mb(rftools_dst))
     print("  total size:    %.1f MB" % dir_size_mb(dist_dir))
 
     if args.release:

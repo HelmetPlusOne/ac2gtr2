@@ -11,7 +11,7 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 ### 27 Nov 2026
 
 - **HAT crash fix for large AC tracks**: Strips zero-area degenerate faces, long needle slivers (`> 50 m` span, `< 10 m` wide), and oversized (`> 50 m`) or distant (`> 200 m` from AIW) off-road terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
-- **Portable dist-local tool paths**: Removed all hardcoded local tool paths; standalone `dist` builds always resolve tools locally, direct Python runs load all tools from `<script_path>/dist/` (requiring `build_dist.py` first), and `build_dist.py` bundles `rfactortools` when available.
+- **Portable dist-local tool paths & rFactorTools bundling**: Removed all hardcoded local tool paths, made `dist` builds always resolve tools locally (with direct Python runs loading tools from `<script_path>/dist/`), and bundled `rFactorTools` (`masunpack.exe`, `rfactorcrypt.exe`, and runtime libraries) into `tools\rfactortools\` so rF1/SCE conversions work standalone.
 
 ### 26 Nov 2026
 
@@ -112,6 +112,7 @@ All tool and data paths are resolved relative to `ac2gtr2.exe`:
 | `tools\blender\` | Portable **Blender 3.6 LTS** (`blender.exe`) with the **rFactor 2 GMT Exporter add-on (`io_rf2_gmt_release`)** pre-installed under `3.6\scripts\addons\io_rf2_gmt_release\`. |
 | `tools\blender_scripts\` | Plain Python scripts executed inside Blender's own interpreter (`blender_stage.py`, `kn5.py`, `backdrop.py`, `mesh_coarsen.py`). |
 | `tools\texconv\texconv.exe` | **Microsoft DirectXTex `texconv.exe`** for DX9 power-of-two DDS conversion, mipmap generation, multilayer material baking, and menu/loading image composition. |
+| `tools\rfactortools\` | **rFactorTools** (`masunpack.exe`, `rfactorcrypt.exe`, and runtime libraries) for unpacking rFactor 1 / Stock Car Extreme `.mas` archives and decrypting Stock Car Extreme assets. |
 | `data\ac\system\data\surfaces.ini` | Default Assetto Corsa surface physics definitions. |
 | `data\gtr2\GameData\Locations\specialfx.tec` | GTR2 terrain/surface feedback reference file. |
 | `out\` | Ready-to-install GTR2 track folders produced by conversions. |
@@ -130,6 +131,7 @@ governed by its own license:
 | **Blender 3.6 LTS** | `tools\blender\` | **GNU GPL v2 or later** (with GPL-3.0-compatible third-party libraries). Full license texts are included in `tools\blender\copyright.txt` and `tools\blender\license\`. Source: https://www.blender.org/ |
 | **rFactor 2 GMT Exporter (`io_rf2_gmt_release` v24.3.9)** | `tools\blender\3.6\scripts\addons\io_rf2_gmt_release\` | Authored by **rFactor2 IO Group** (distributed via the Studio-397 community forum: https://forum.studio-397.com/index.php?threads/blender-rfactor2-export-scripts.74821/). Shipped without a separate license file; check the author's terms before redistributing. |
 | **DirectXTex `texconv.exe`** | `tools\texconv\texconv.exe` | **MIT License** — Microsoft Corporation (https://github.com/microsoft/DirectXTex/blob/main/LICENSE). |
+| **rFactorTools** (`masunpack`, `rfactorcrypt`) | `tools\rfactortools\` | **GNU GPL v3** — Ingo Ruhnke (https://github.com/Grumbel/rfactortools). Full license text included in `tools\rfactortools\COPYING.txt`. |
 
 This converter is based on `ac-to-ams1` and https://github.com/Mewzapchu/ac-to-rf2.
 
