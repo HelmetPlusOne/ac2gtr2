@@ -8,9 +8,13 @@ Additionally the tracks from rFactor 1 and Stock Car Extreme are also supported 
 
 ## Changelog
 
+### 28 Nov 2026
+
+- **rFactor 1 shader, tangent, and JPG/PNG texture fixes (#1)**: Maps rF1 `*LERPT1*VERTEXALPHA` bump and diffuse shaders to valid stock GTR2 multiply shaders (`L2BUMPT0XT1`, `L*DIFFUSET0XT1*`) with exact stage counts and re-indexed bump UVs, fixes the rF1->GTR2 mesh tangent stream offset (`+0x1C`), and converts `.jpg`/`.jpeg`/`.png` textures packed inside rF1 `.mas` archives to DX9 `.dds` instead of replacing them with blank fallbacks.
+- **CSP hidden mesh support (`ext_config.ini`)**: Honors unconditional CSP `[MESH_ADJUSTMENT]` rules with `IS_RENDERABLE = 0` / `IS_VISIBLE = 0` / `IS_ACTIVE = 0`, preventing invisible physics bump overlays and replaced 2D crowd placeholders (e.g., magenta surfaces/crowds on tracks like Sebring 60s) from rendering visibly in GTR2 while keeping physical collision intact.
+
 ### 27 Nov 2026
 
-- **CSP hidden mesh support (`ext_config.ini`)**: Honors unconditional CSP `[MESH_ADJUSTMENT]` rules with `IS_RENDERABLE = 0` / `IS_VISIBLE = 0` / `IS_ACTIVE = 0`, preventing invisible physics bump overlays and replaced 2D crowd placeholders (e.g., magenta surfaces/crowds on tracks like Sebring 60s) from rendering visibly in GTR2 while keeping physical collision intact.
 - **HAT crash fix for large AC tracks**: Strips zero-area degenerate faces, long needle slivers (`> 50 m` span, `< 10 m` wide), and oversized (`> 50 m`) or distant (`> 200 m` from AIW) off-road terrain HAT triangles, sets `HATTarget=False` on collision walls, and prevents AC meshes from overwriting `skyboxi.gmt` / pit gate GMTs.
 - **Portable dist-local tool paths & rFactorTools bundling**: Removed all hardcoded local tool paths, made `dist` builds always resolve tools locally (with direct Python runs loading tools from `<script_path>/dist/`), and bundled `rFactorTools` (`masunpack.exe`, `rfactorcrypt.exe`, and runtime libraries) into `tools\rfactortools\` so rF1/SCE conversions work standalone.
 
