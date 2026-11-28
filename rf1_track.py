@@ -28,7 +28,8 @@ import fix_textures
 import gmt_gtr2
 import steam_paths
 
-TEXTURE_EXTS = {".dds", ".tga", ".bmp", ".bik"}
+IMAGE_TEXTURE_EXTS = {".jpg", ".jpeg", ".png"}
+TEXTURE_EXTS = {".dds", ".tga", ".bmp", ".bik"} | IMAGE_TEXTURE_EXTS
 SKYBOX_GMTS = {
     "skyboxi.gmt", "horizon.gmt", "horizonlights.gmt", "sky.gmt",
     "day.gmt", "night.gmt", "sunrise.gmt", "sunset.gmt", "sun.gmt", "moon.gmt",
@@ -1619,6 +1620,70 @@ def _make_tex_resolver(tex_files_lower, stem_to_name, renamed_maps=None):
     return _resolve
 
 
+def _convert_image_textures_to_dds(map_dir, texconv, map_registry=None, renamed_maps=None):
+    """Convert non-DDS image textures (.jpg/.jpeg/.png) in ``map_dir`` to DX9 DDS.
+
+    GTR2 only loads DDS/TGA/BMP/BIK textures, while some rFactor 1 tracks pack
+    diffuse/alpha textures as ``.jpg`` or ``.png`` inside their maps ``.mas``.
+    Converts each image to ``<stem>.dds`` (BC1 for opaque JPEG, BC3 for PNG)
+    and removes the source image; ``_fix_invalid_dds`` then enforces power-of-two
+    dimensions and mipmaps on any non-pow2 outputs.
+    """
+    if not os.path.isdir(map_dir) or not texconv or not os.path.isfile(texconv):
+        return 0
+    imgs = [
+        fn for fn in sorted(os.listdir(map_dir))
+        if os.path.splitext(fn)[1].lower() in IMAGE_TEXTURE_EXTS
+        and os.path.isfile(os.path.join(map_dir, fn))
+    ]
+    if not imgs:
+        return 0
+    existing_lower = {f.lower(): f for f in os.listdir(map_dir)}
+    converted = 0
+    with tempfile.TemporaryDirectory(prefix="ac2gtr2-rf1-img-") as tmp:
+        for fn in imgs:
+            src = os.path.join(map_dir, fn)
+            stem, ext = os.path.splitext(fn)
+            ext_l = ext.lower()
+            dds_name = stem + ".dds"
+            dds_low = dds_name.lower()
+            if dds_low in existing_lower:
+                # A DDS with the same stem already exists; keep it and drop the image.
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+                if map_registry is not None:
+                    map_registry.pop(fn.lower(), None)
+                if renamed_maps is not None:
+                    renamed_maps[fn.lower()] = existing_lower[dds_low]
+                    for rk, rv in list(renamed_maps.items()):
+                        if rv.lower() == fn.lower():
+                            renamed_maps[rk] = existing_lower[dds_low]
+                continue
+            fmt = "BC3_UNORM" if ext_l == ".png" else "BC1_UNORM"
+            cmd = [texconv, "-y", "-ft", "dds", "-f", fmt, "-sepalpha", "-o", tmp, src]
+            res = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+            out_p = os.path.join(tmp, dds_name)
+            if res.returncode == 0 and os.path.isfile(out_p):
+                shutil.copy2(out_p, os.path.join(map_dir, dds_name))
+                try:
+                    os.remove(src)
+                except OSError:
+                    pass
+                existing_lower[dds_low] = dds_name
+                if map_registry is not None:
+                    map_registry.pop(fn.lower(), None)
+                    map_registry[dds_low] = dds_name
+                if renamed_maps is not None:
+                    renamed_maps[fn.lower()] = dds_name
+                    for rk, rv in list(renamed_maps.items()):
+                        if rv.lower() == fn.lower():
+                            renamed_maps[rk] = dds_name
+                converted += 1
+    return converted
+
+
 def _fix_invalid_dds(map_dir, texconv, jobs=1):
     """Re-encode only DDS files GTR2 cannot load (scale=1.0, never downscales)."""
     if not os.path.isdir(map_dir) or not texconv or not os.path.isfile(texconv):
@@ -1906,6 +1971,20 @@ def convert_rf1_track(track_dir, layout=None, install=None, masunpack=None,
     n_dec_tex = decrypt_sce_textures(all_map_dirs, rfactorcrypt=crypt_tool)
     if n_dec_tex:
         print("   decrypted %d Stock Car Extreme texture file(s)" % n_dec_tex)
+    conv_imgs = _convert_image_textures_to_dds(
+        maps_dir, tex_tool, map_registry=shared_maps, renamed_maps=renamed_maps
+    )
+    for lay in selected:
+        lname = lay["name"]
+        for rel in layout_extra_paths.get(lname, ()):
+            if rel.startswith("maps_"):
+                conv_imgs += _convert_image_textures_to_dds(
+                    os.path.join(stage, rel), tex_tool,
+                    map_registry=layout_maps.get(lname),
+                    renamed_maps=renamed_maps,
+                )
+    if conv_imgs:
+        print("   converted %d JPG/PNG texture(s) to DX9 DDS" % conv_imgs)
     fixed_dds = 0
     for md in all_map_dirs:
         fixed_dds += _fix_invalid_dds(md, tex_tool, jobs=jobs)

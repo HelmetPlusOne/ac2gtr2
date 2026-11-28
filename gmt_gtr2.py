@@ -1414,22 +1414,21 @@ RF1_SHADER_MAP = {
     "L0CMAPADDT0XT1": "L0CMAPT0",
     "L1CMAPADDT0XT1": "L1CMAPT0XT1",
     "L2CMAPADDT0XT1": "L2CMAPT0XT1",
-    # rF1 vertex-alpha lerp diffuse variants -> GTR2 DIFFUSE.GFX exact stage-count matches.
-    "L0DIFFUSET0LERPT1VERTEXALPHA": "L0DIFFUSET0LERPT1",
-    "L1DIFFUSET0LERPT1VERTEXALPHA": "L1DIFFUSET0LERPT1",
-    "L2DIFFUSET0LERPT1VERTEXALPHA": "L2DIFFUSET0LERPT1",
-    "L1DIFFUSET0LERPT1T2VERTEXALPHA": "L1DIFFUSET0T1T2",
-    "L2DIFFUSET0LERPT1T2VERTEXALPHA": "L2DIFFUSET0T1T2",
-    "L1DIFFUSET0LERPT1XT2VERTEXALPHA": "L1DIFFUSET0T1XT2",
-    "L2DIFFUSET0LERPT1XT2VERTEXALPHA": "L2DIFFUSET0T1XT2",
-    "L1DIFFUSET0LERPT1T2T3VERTEXALPHA": "L1DIFFUSET0T1T2T3",
-    "L2DIFFUSET0LERPT1T2T3VERTEXALPHA": "L2DIFFUSET0T1T2T3",
-    "L1DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L1DIFFUSET0T1XT2T3",
-    "L2DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L2DIFFUSET0T1XT2T3",
-    "L1DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L1DIFFUSET0T1T2XT3",
-    "L2DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L2DIFFUSET0T1T2XT3",
-    "L1DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L1DIFFUSET0T1XT2XT3",
-    "L2DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L2DIFFUSET0T1XT2XT3",
+    # rF1 vertex-alpha lerp diffuse variants -> GTR2 DIFFUSE.GFX exact stage-count
+    # multiply (T0xT1*) matches. GTR2's T0T1* variants are additive (T0+T1, which
+    # blows terrain out to bright yellow-white) and L2DiffuseT0lerpT1 is unlit.
+    "L1DIFFUSET0LERPT1T2VERTEXALPHA": "L1DIFFUSET0XT1T2",
+    "L2DIFFUSET0LERPT1T2VERTEXALPHA": "L2DIFFUSET0XT1T2",
+    "L1DIFFUSET0LERPT1XT2VERTEXALPHA": "L1DIFFUSET0XT1XT2",
+    "L2DIFFUSET0LERPT1XT2VERTEXALPHA": "L2DIFFUSET0XT1XT2",
+    "L1DIFFUSET0LERPT1T2T3VERTEXALPHA": "L1DIFFUSET0XT1T2T3",
+    "L2DIFFUSET0LERPT1T2T3VERTEXALPHA": "L2DIFFUSET0XT1T2T3",
+    "L1DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L1DIFFUSET0XT1XT2T3",
+    "L2DIFFUSET0LERPT1XT2T3VERTEXALPHA": "L2DIFFUSET0XT1XT2T3",
+    "L1DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L1DIFFUSET0XT1T2XT3",
+    "L2DIFFUSET0LERPT1T2XT3VERTEXALPHA": "L2DIFFUSET0XT1T2XT3",
+    "L1DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L1DIFFUSET0XT1XT2XT3",
+    "L2DIFFUSET0LERPT1XT2XT3VERTEXALPHA": "L2DIFFUSET0XT1XT2XT3",
 }
 
 
@@ -1439,6 +1438,18 @@ RF1_SHADER_MAP = {
 #   shader_upper -> (gtr2_shader, kept_indices_or_None, extra_math_specs)
 # where extra_math_specs is a tuple of (stage, flags, unk68) MATH records to append.
 RF1_SHADER_STAGE_MAP = {
+    # rF1 2-texture vertex-alpha lerp diffuse & bump shaders:
+    # - rF1 L0DIFFUSET0LERPT1VERTEXALPHA carries 3 stages (T0, T1, MATH), while
+    #   GTR2 L0/L1/L2DiffuseT0xT1 take 2 stages (T0, T1) with diffuse lighting
+    #   (GTR2's L2DiffuseT0lerpT1 is unlit skybox-only blend).
+    # - GTR2 BUMPMAP.GFX has no L2BumpT0lerpT1; L2BumpT0xT1 is the exact 3-stage
+    #   (T0, T1, Bump) match.
+    "L0DIFFUSET0LERPT1VERTEXALPHA": ("L0DIFFUSET0XT1", (0, 1), ()),
+    "L1DIFFUSET0LERPT1VERTEXALPHA": ("L1DIFFUSET0XT1", (0, 1), ()),
+    "L2DIFFUSET0LERPT1VERTEXALPHA": ("L2DIFFUSET0XT1", (0, 1), ()),
+    "L1BUMPT0LERPT1VERTEXALPHA": ("L1DIFFUSET0XT1", (0, 1), ()),
+    "L2BUMPT0LERPT1VERTEXALPHA": ("L2BUMPT0XT1", (0, 1, 2), ()),
+    "L2BUMPSPECT0LERPT1VERTEXALPHA": ("L2BUMPT0XT1", (0, 1, 2), ()),
     # Reiza road shaders -> GTR2 L2BUMPT0XT1 (0=Diffuse, 1=Detail, 2=Bump)
     "SIMPLEROADSHADERV2": ("L2BUMPT0XT1", (0, 1, 3), ()),
     "SIMPLEROADSHADER": ("L2BUMPT0XT1", (0, 1, 3), ()),
@@ -1503,8 +1514,8 @@ def _remap_rf1_shader_name(name):
         return RF1_SHADER_MAP[up]
     if up.endswith("VERTEXALPHA"):
         base = up[:-len("VERTEXALPHA")]
-        if "LERPT1" in base and ("T2" in base or "T3" in base):
-            base = base.replace("LERPT1", "T1", 1)
+        if "LERPT1" in base:
+            base = base.replace("LERPT1", "XT1", 1)
         return base
     return name
 
@@ -1611,17 +1622,22 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True,
             for lv_i, (first_t, tcnt, orig_sh, sb) in enumerate(levels):
                 src_slice = tex_records[first_t:first_t + tcnt] if first_t + tcnt <= len(tex_records) else []
                 spec = RF1_SHADER_STAGE_MAP.get(orig_sh)
+                kept_src_idxs = None
                 if spec is not None:
                     mapped_sh, keep_idxs, extra_math = spec
                     if keep_idxs is None:
                         kept = list(src_slice)
+                        kept_src_idxs = list(range(len(src_slice)))
                     else:
-                        kept = [src_slice[k] for k in keep_idxs if k < len(src_slice)]
+                        kept_src_idxs = [k for k in keep_idxs if k < len(src_slice)]
+                        kept = [src_slice[k] for k in kept_src_idxs]
                         if not kept and src_slice:
                             kept = [src_slice[0]]
+                            kept_src_idxs = [0]
                 else:
                     mapped_sh = _remap_rf1_shader_name(orig_sh).upper()
                     kept = list(src_slice)
+                    kept_src_idxs = list(range(len(src_slice)))
                     extra_math = ()
                     if mapped_sh == "L2BUMPSPECMAPT0" and len(kept) == 3:
                         extra_math = ((3, 0x8000, 1), (4, 0x18, -1))
@@ -1632,21 +1648,25 @@ def _rewrite_rf1_materials(mat_bytes, label="GMT", remap_surfaces=True,
                 if not has_tan and mapped_sh in _BUMP_DOWNGRADE_MAP:
                     mapped_sh, dg_idxs = _BUMP_DOWNGRADE_MAP[mapped_sh]
                     kept = [kept[k] for k in dg_idxs if k < len(kept)]
+                    kept_src_idxs = [kept_src_idxs[k] for k in dg_idxs if k < len(kept_src_idxs)]
                     extra_math = ()
 
                 # Clamp UV channel indices on kept static textures to GTR2's
-                # 4-channel (0..3) TEXCOORD space; track uv4 -> uv2 remapping
-                # for meshes with uv2 stream. Skip animated records (anim_frames > 1)
-                # because offset 88 falls inside their frame sequence array.
+                # 4-channel (0..3) TEXCOORD space and re-index dropped stages
+                # (e.g. stage 3 bump moved to stage 2 on L2BumpT0xT1); track
+                # uv4 -> uv2 remapping for meshes with uv2 stream. Skip animated
+                # records (anim_frames > 1) because offset 88 falls inside their
+                # frame sequence array.
                 fixed_kept = []
                 for new_si, raw_tb in enumerate(kept):
                     tb = bytearray(raw_tb)
+                    orig_si = kept_src_idxs[new_si] if new_si < len(kept_src_idxs) else new_si
                     if len(tb) >= 92 and struct.unpack_from("<I", tb, 72)[0] <= 1:
                         uv_ch = struct.unpack_from("<I", tb, 88)[0]
                         if uv_ch == 4 and new_si == 2:
                             struct.pack_into("<I", tb, 88, 2)
                             uv4_remap_mats.add(mi)
-                        elif uv_ch >= 4:
+                        elif uv_ch >= 4 or (orig_si != new_si and uv_ch == orig_si and uv_ch >= len(kept)):
                             struct.pack_into("<I", tb, 88, min(new_si, 3))
                     fixed_kept.append(bytes(tb))
 
@@ -1796,8 +1816,8 @@ def convert_rf1_to_gtr2(data, label="GMT", remap_surfaces=True, tex_resolver=Non
         desc_pos = GTR2_HEADER_SIZE + mi * GTR2_MESH_SIZE
         struct.pack_into(
             "<11I", out, desc_pos,
-            m_flags, mat_idx, vcnt, v_pos - 4, 0, uv_pos - 4, tan_rel,
-            0, 0, icnt, tri_pos - 4,
+            m_flags, mat_idx, vcnt, v_pos - 4, 0, uv_pos - 4, 0,
+            tan_rel, 0, icnt, tri_pos - 4,
         )
         struct.pack_into("<I", out, desc_pos + 0x5C, 0xFFFFFFFF)
 

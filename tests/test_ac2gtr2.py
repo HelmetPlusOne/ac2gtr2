@@ -895,10 +895,14 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
                  + 3 * gmt_gtr2.GTR2_SHADER_INFO_SIZE
                  + gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD + 4)
         self.assertEqual(struct.unpack_from("<I", gtr2_raw, m1_t0 + 64)[0], 0x18)
-        # Verify mesh 0 -> mat 0 and mesh 1 -> mat 1 in GTR2 108-byte mesh descriptors.
+        # Verify mesh 0 -> mat 0 and mesh 1 -> mat 1 in GTR2 108-byte mesh descriptors,
+        # and that mesh 1 writes UVTangents offset at +0x1C (+0x18 unused = 0).
         out_moff = struct.unpack_from("<I", gtr2_raw, 0x170)[0] + 4
         self.assertEqual(struct.unpack_from("<I", gtr2_raw, out_moff + 4)[0], 0)
-        self.assertEqual(struct.unpack_from("<I", gtr2_raw, out_moff + gmt_gtr2.GTR2_MESH_SIZE + 4)[0], 1)
+        m1_vals = struct.unpack_from("<11I", gtr2_raw, out_moff + gmt_gtr2.GTR2_MESH_SIZE)
+        self.assertEqual(m1_vals[1], 1)
+        self.assertEqual(m1_vals[6], 0)
+        self.assertGreater(m1_vals[7], 0)
         # plane_d = dot((0,1,0), (0,2,0)) = 2.0
         out_foff = struct.unpack_from("<I", gtr2_raw, 0x178)[0] + 4
         plane_d = struct.unpack_from("<f", gtr2_raw, out_foff + 16)[0]
@@ -911,7 +915,11 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
         self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2CMAPADDT0"), "L2CMAPT0")
         self.assertEqual(
             gmt_gtr2._remap_rf1_shader_name("L2DIFFUSET0LERPT1XT2T3VERTEXALPHA"),
-            "L2DIFFUSET0T1XT2T3",
+            "L2DIFFUSET0XT1XT2T3",
+        )
+        self.assertEqual(
+            gmt_gtr2._remap_rf1_shader_name("L2BUMPT0LERPT1VERTEXALPHA"),
+            "L2BUMPT0XT1",
         )
         self.assertEqual(gmt_gtr2._remap_rf1_shader_name("L2DIFFUSET0"), "L2DIFFUSET0")
         # Stock Car Extreme / Reiza custom shaders map to stock GTR2 GFX.GTR shaders.
@@ -1275,6 +1283,182 @@ class StandaloneCliAndConfigTests(unittest.TestCase):
             self.assertFalse(any(rx.match("disabled_mesh") for rx in mesh_rx))
             self.assertFalse(any(rx.match("night_only_mesh") for rx in mesh_rx))
             self.assertFalse(any(rx.match("1ROAD100") for rx in mesh_rx))
+
+    def test_rf1_vertexalpha_shaders_tangent_offset_and_image_textures(self):
+        import gmt_gtr2
+        import rf1_track
+
+        def _make_tex_rec(name, stage):
+            tb = bytearray(gmt_gtr2.GTR2_TEXTURE_SIZE)
+            tb[:64] = gmt_gtr2._pad_ascii(name, 64)
+            struct.pack_into("<I", tb, 72, 1)  # static texture
+            struct.pack_into("<I", tb, 88, stage)
+            return bytes(tb)
+
+        def _make_rf1_mat(name, level_specs, tex_recs):
+            buf = bytearray()
+            mhdr = bytearray(gmt_gtr2.GTR2_MAT_HEADER_SIZE)
+            mhdr[:64] = gmt_gtr2._pad_ascii(name, 64)
+            buf.extend(mhdr)
+            for first_t, cnt, sh_name in level_specs:
+                sb = bytearray(gmt_gtr2.GTR2_SHADER_INFO_SIZE)
+                struct.pack_into("<2I", sb, 0, first_t, cnt)
+                sb[8:72] = gmt_gtr2._pad_ascii(sh_name, 64)
+                buf.extend(sb)
+            buf.extend(bytes(gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD))
+            buf.extend(struct.pack("<I", len(tex_recs)))
+            for tr in tex_recs:
+                buf.extend(tr)
+            return bytes(buf)
+
+        def _parse_gtr2_mats(mat_bytes):
+            nmat = struct.unpack_from("<I", mat_bytes, 0)[0]
+            pos = 4
+            out = []
+            for _ in range(nmat):
+                mname = mat_bytes[pos:pos + 64].split(b"\x00", 1)[0].decode("ascii")
+                pos += gmt_gtr2.GTR2_MAT_HEADER_SIZE
+                lvs = []
+                for _ in range(3):
+                    ft, tc = struct.unpack_from("<2I", mat_bytes, pos)
+                    sh = mat_bytes[pos + 8:pos + 72].split(b"\x00", 1)[0].decode("ascii")
+                    lvs.append((sh, ft, tc))
+                    pos += gmt_gtr2.GTR2_SHADER_INFO_SIZE
+                pos += gmt_gtr2.GTR2_MAT_POST_SHADERS_PAD
+                ntex = struct.unpack_from("<I", mat_bytes, pos)[0]
+                pos += 4
+                texs = []
+                for _ in range(ntex):
+                    sz = gmt_gtr2.tex_record_size(mat_bytes, pos)
+                    tn = mat_bytes[pos:pos + 64].split(b"\x00", 1)[0].decode("ascii")
+                    st = struct.unpack_from("<I", mat_bytes, pos + 88)[0]
+                    texs.append((tn, st))
+                    pos += sz
+                out.append((mname, lvs, texs))
+            return out
+
+        # Build 3 rF1 materials matching Racalmuto's vertex-alpha terrain shaders:
+        # 0: grvl8_0 (L2BUMPT0LERPT1VERTEXALPHA, 3 stages on L0 incl. MATH)
+        mat0 = _make_rf1_mat(
+            "grvl8_0",
+            [
+                (0, 3, "L0DIFFUSET0LERPT1VERTEXALPHA"),
+                (3, 2, "L1DIFFUSET0LERPT1VERTEXALPHA"),
+                (5, 3, "L2BUMPT0LERPT1VERTEXALPHA"),
+            ],
+            [
+                _make_tex_rec("sand.dds", 0), _make_tex_rec("sat.dds", 1), _make_tex_rec("MATH", 2),
+                _make_tex_rec("sand.dds", 0), _make_tex_rec("sat.dds", 1),
+                _make_tex_rec("sand.dds", 0), _make_tex_rec("sat.dds", 1), _make_tex_rec("sand_b.dds", 2),
+            ],
+        )
+        # 1: grass4_0 (L2DIFFUSET0LERPT1XT2T3VERTEXALPHA -> multiply T0xT1xT2+T3)
+        mat1 = _make_rf1_mat(
+            "grass4_0",
+            [
+                (0, 3, "L0DIFFUSET0LERPT1VERTEXALPHA"),
+                (3, 2, "L1DIFFUSET0LERPT1VERTEXALPHA"),
+                (5, 4, "L2DIFFUSET0LERPT1XT2T3VERTEXALPHA"),
+            ],
+            [
+                _make_tex_rec("grass.dds", 0), _make_tex_rec("sat.dds", 1), _make_tex_rec("MATH", 2),
+                _make_tex_rec("grass.dds", 0), _make_tex_rec("sat.dds", 1),
+                _make_tex_rec("grass.dds", 0), _make_tex_rec("sat.dds", 1),
+                _make_tex_rec("multi.dds", 2), _make_tex_rec("add.dds", 3),
+            ],
+        )
+        # 2: grvl91_0 (L2BUMPSPECMAPT0LERPT1VERTEXALPHA -> L2BUMPT0XT1, bump stage 3 -> 2)
+        mat2 = _make_rf1_mat(
+            "grvl91_0",
+            [
+                (0, 3, "L0DIFFUSET0LERPT1VERTEXALPHA"),
+                (3, 2, "L1DIFFUSET0LERPT1VERTEXALPHA"),
+                (5, 4, "L2BUMPSPECMAPT0LERPT1VERTEXALPHA"),
+            ],
+            [
+                _make_tex_rec("grv.dds", 0), _make_tex_rec("sat.dds", 1), _make_tex_rec("MATH", 2),
+                _make_tex_rec("grv.dds", 0), _make_tex_rec("sat.dds", 1),
+                _make_tex_rec("grv.dds", 0), _make_tex_rec("sat.dds", 1),
+                _make_tex_rec("grv_s.dds", 2), _make_tex_rec("grv_b.dds", 3),
+            ],
+        )
+
+        rewritten, _uv4 = gmt_gtr2._rewrite_rf1_materials(
+            struct.pack("<I", 3) + mat0 + mat1 + mat2,
+            remap_surfaces=False,
+            mat_has_tangents={0: True, 1: False, 2: True},
+        )
+        parsed = _parse_gtr2_mats(rewritten)
+
+        # grvl8_0: L0/L1 drop stray MATH -> 2 stages L*DIFFUSET0XT1; L2 -> L2BUMPT0XT1 (3 stages)
+        self.assertEqual(parsed[0][1], [("L0DIFFUSET0XT1", 0, 2), ("L1DIFFUSET0XT1", 2, 2), ("L2BUMPT0XT1", 4, 3)])
+        self.assertEqual(parsed[0][2][4:7], [("sand.dds", 0), ("sat.dds", 1), ("sand_b.dds", 2)])
+
+        # grass4_0: L2 -> L2DIFFUSET0XT1XT2T3 (4 stages, multiply instead of additive)
+        self.assertEqual(parsed[1][1], [("L0DIFFUSET0XT1", 0, 2), ("L1DIFFUSET0XT1", 2, 2), ("L2DIFFUSET0XT1XT2T3", 4, 4)])
+
+        # grvl91_0: L2 -> L2BUMPT0XT1 with bump stage re-indexed from 3 to 2
+        self.assertEqual(parsed[2][1], [("L0DIFFUSET0XT1", 0, 2), ("L1DIFFUSET0XT1", 2, 2), ("L2BUMPT0XT1", 4, 3)])
+        self.assertEqual(parsed[2][2][4:7], [("grv.dds", 0), ("sat.dds", 1), ("grv_b.dds", 2)])
+
+        # Verify convert_rf1_to_gtr2 writes tangent stream offset at +0x1C (and +0x18 == 0).
+        rf1_hdr_size = gmt_gtr2.RF1_HEADER_MIN_SIZE
+        rf1_hdr = bytearray(rf1_hdr_size + gmt_gtr2.RF1_MESH_SIZE)
+        v_pos = len(rf1_hdr)
+        rf1_hdr.extend(b"\x00" * (3 * gmt_gtr2.GTR2_VERTEX_SIZE))
+        uv_pos = len(rf1_hdr)
+        rf1_hdr.extend(b"\x00" * (3 * gmt_gtr2.GTR2_UV_SIZE))
+        tan_pos = len(rf1_hdr)
+        rf1_hdr.extend(b"\x00" * (3 * gmt_gtr2.GTR2_TANGENT_SIZE))
+        tri_pos = len(rf1_hdr)
+        rf1_hdr.extend(struct.pack("<3H", 0, 1, 2))
+        mat_pos = len(rf1_hdr)
+        rf1_hdr.extend(struct.pack("<I", 1) + mat0)
+        struct.pack_into("<2I", rf1_hdr, 0, mat_pos - 4, 0x04000020)
+        struct.pack_into("<8I", rf1_hdr, 0x174, 1, rf1_hdr_size - 4, 0, 0, 0, 0, 0, v_pos - 4)
+        desc = rf1_hdr_size
+        struct.pack_into(
+            "<10I", rf1_hdr, desc,
+            0x20004015, v_pos - 4, 0, uv_pos - 4, 0, tan_pos - 4, 3, 0, 3, tri_pos - 4,
+        )
+        struct.pack_into("<I", rf1_hdr, desc + 0x38, 0)
+        gtr2_bytes = gmt_gtr2.convert_rf1_to_gtr2(bytes(rf1_hdr), remap_surfaces=False)
+        vals = struct.unpack_from("<11I", gtr2_bytes, gmt_gtr2.GTR2_HEADER_SIZE)
+        self.assertEqual(vals[6], 0)          # +0x18 unused
+        self.assertGreater(vals[7], 0)        # +0x1C UVTangents offset
+
+        # Verify TEXTURE_EXTS includes .jpg/.jpeg/.png and _convert_image_textures_to_dds updates maps.
+        self.assertTrue({".jpg", ".jpeg", ".png"}.issubset(rf1_track.TEXTURE_EXTS))
+        with tempfile.TemporaryDirectory() as tmp:
+            for fn in ("TEXTURE0.JPG", "GREENFLAG.PNG"):
+                with open(os.path.join(tmp, fn), "wb") as f:
+                    f.write(b"dummy")
+            fake_tc = os.path.join(tmp, "texconv.exe")
+            with open(fake_tc, "wb") as f:
+                f.write(b"MZ")
+            reg = {"texture0.jpg": "TEXTURE0.JPG", "greenflag.png": "GREENFLAG.PNG"}
+            ren = {}
+
+            def _fake_run(cmd, **kw):
+                out_dir = cmd[cmd.index("-o") + 1]
+                src_p = cmd[-1]
+                out_dds = os.path.join(out_dir, os.path.splitext(os.path.basename(src_p))[0] + ".dds")
+                with open(out_dds, "wb") as f:
+                    f.write(b"DDS " + b"\x00" * 124)
+                return mock.Mock(returncode=0)
+
+            with mock.patch.object(rf1_track.subprocess, "run", side_effect=_fake_run):
+                n_conv = rf1_track._convert_image_textures_to_dds(
+                    tmp, fake_tc, map_registry=reg, renamed_maps=ren
+                )
+            self.assertEqual(n_conv, 2)
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "TEXTURE0.dds")))
+            self.assertTrue(os.path.isfile(os.path.join(tmp, "GREENFLAG.dds")))
+            self.assertFalse(os.path.exists(os.path.join(tmp, "TEXTURE0.JPG")))
+            self.assertEqual(ren["texture0.jpg"], "TEXTURE0.dds")
+            self.assertEqual(ren["greenflag.png"], "GREENFLAG.dds")
+            self.assertIn("texture0.dds", reg)
+            self.assertNotIn("texture0.jpg", reg)
 
 
 if __name__ == "__main__":
